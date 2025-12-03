@@ -100,17 +100,65 @@ create_default_config() {
     [ -f "$config" ] && return 0
     mkdir -p "$CONFIG_DIR"
     cat > "$config" << 'EOF'
+# Chrome DevTools CLI Configuration
+# See: https://github.com/user/chrome-devtools-cli
+
 [browser]
 headless = true
+port = 9222
+window_width = 1280
+window_height = 800
+# chrome_path = "/path/to/chrome"  # auto-detect if not set
+# user_data_dir = "/path/to/profile"
+# profile_directory = "Default"  # Chrome profile directory name
+# extension_path = "/path/to/extension"
+disable_web_security = false
+reuse_browser = false
 
 [performance]
 navigation_timeout_seconds = 30
+network_idle_timeout_ms = 2000
+trace_categories = ["loading", "devtools.timeline", "blink.user_timing"]
+
+[emulation]
+default_device = "Desktop"
+# custom_devices_path = "/path/to/devices.json"
+
+[network]
+# proxy = "http://proxy:8080"
+# user_agent = "Custom User Agent"
 
 [output]
 default_screenshot_format = "png"
+screenshot_quality = 90
+json_pretty = false
 
 [dialog]
-behavior = "dismiss"
+behavior = "dismiss"  # dismiss, accept, none
+# prompt_text = "default prompt response"
+
+[server]
+# socket_path = "/tmp/chrome-devtools-cli.sock"
+# max_sessions = 10
+# session_timeout_secs = 3600
+cdp_port_range = [9222, 9299]
+http_port_range = [9300, 9399]
+ws_port_range = [9400, 9499]
+# cdp_port = 9222  # Fixed port instead of range
+# http_port = 9300  # Fixed port instead of range
+# ws_port = 9400  # Fixed port instead of range
+
+[filters]
+network_exclude_types = ["Image", "Stylesheet", "Font", "Media"]
+network_exclude_domains = [
+    "google-analytics.com",
+    "googletagmanager.com",
+    "doubleclick.net",
+    "facebook.com",
+    "facebook.net"
+]
+console_levels = ["error", "warn"]
+network_max_body_size = 10000
 EOF
     echo "Config: $config" >&2
 }
@@ -149,7 +197,10 @@ main() {
     create_default_config
     install_skill
 
-    echo "$PATH" | grep -q "$INSTALL_DIR" || echo "" >&2 && echo "Add to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
+    if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
+        echo "" >&2
+        echo "Add to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
+    fi
 
     echo "" >&2
     echo "Installation complete!" >&2

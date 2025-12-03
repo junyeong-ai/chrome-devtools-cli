@@ -6,7 +6,6 @@ release/
 *.rlib
 *.prof*
 **/*.rs.bk
-Cargo.lock
 
 # IDEs
 .idea/
