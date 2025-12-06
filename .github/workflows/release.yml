@@ -24,8 +24,6 @@ jobs:
             os: macos-13
           - target: aarch64-apple-darwin
             os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -58,20 +56,11 @@ jobs:
         run: |
           version="${GITHUB_REF#refs/tags/v}"
           target="${{ matrix.target }}"
-
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            binary="target/$target/release/chrome-devtools-cli.exe"
-            archive="chrome-devtools-cli-v${version}-${target}.zip"
-            cp "$binary" chrome-devtools-cli.exe
-            7z a "$archive" chrome-devtools-cli.exe
-            echo "ASSET=$archive" >> $GITHUB_ENV
-          else
-            binary="target/$target/release/chrome-devtools-cli"
-            archive="chrome-devtools-cli-v${version}-${target}.tar.gz"
-            cp "$binary" chrome-devtools-cli
-            tar -czf "$archive" chrome-devtools-cli
-            echo "ASSET=$archive" >> $GITHUB_ENV
-          fi
+          binary="target/$target/release/chrome-devtools-cli"
+          archive="chrome-devtools-cli-v${version}-${target}.tar.gz"
+          cp "$binary" chrome-devtools-cli
+          tar -czf "$archive" chrome-devtools-cli
+          echo "ASSET=$archive" >> $GITHUB_ENV
 
       - name: Generate checksum
         shell: bash
