@@ -50,12 +50,11 @@ install_chrome_for_testing() {
 
     [ -z "$url" ] && { echo "Download URL not found" >&2; return 1; }
 
-    local install_dir="$chrome_dir/${platform}-${version}"
+    local install_dir="$chrome_dir/$version"
     mkdir -p "$install_dir"
 
     local tmp=$(mktemp -d)
-    curl -sL "$url" -o "$tmp/chrome.zip" && unzip -q "$tmp/chrome.zip" -d "$tmp"
-    mv "$tmp"/chrome-*/* "$install_dir/" 2>/dev/null || mv "$tmp"/*/* "$install_dir/"
+    curl -sL "$url" -o "$tmp/chrome.zip" && unzip -q "$tmp/chrome.zip" -d "$install_dir"
     rm -rf "$tmp"
 
     [[ "$OSTYPE" == darwin* ]] && xattr -cr "$install_dir" 2>/dev/null || true

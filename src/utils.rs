@@ -41,42 +41,33 @@ fn find_in_standard_locations() -> Result<Option<PathBuf>> {
 #[cfg(target_os = "macos")]
 fn find_chrome_for_testing() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    let config_dir = PathBuf::from(home).join(".config/chrome-devtools-cli");
+    let chrome_dir = PathBuf::from(home)
+        .join(".config/chrome-devtools-cli/chrome-for-testing");
 
-    for pattern in ["chrome-for-testing", "chrome"] {
-        let base = config_dir.join(pattern);
-        if !base.exists() {
-            continue;
-        }
+    if !chrome_dir.exists() {
+        return None;
+    }
 
-        if let Ok(entries) = std::fs::read_dir(&base) {
-            for entry in entries.flatten() {
-                let cft_path = entry
-                    .path()
-                    .join("chrome-mac-arm64")
-                    .join("Google Chrome for Testing.app")
-                    .join("Contents/MacOS/Google Chrome for Testing");
-                if cft_path.exists() {
-                    return Some(cft_path);
-                }
-
-                let cft_x64 = entry
-                    .path()
-                    .join("chrome-mac-x64")
-                    .join("Google Chrome for Testing.app")
-                    .join("Contents/MacOS/Google Chrome for Testing");
-                if cft_x64.exists() {
-                    return Some(cft_x64);
-                }
+    let entries = std::fs::read_dir(&chrome_dir).ok()?;
+    for entry in entries.flatten() {
+        for arch in ["chrome-mac-arm64", "chrome-mac-x64"] {
+            let executable = entry.path()
+                .join(arch)
+                .join("Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing");
+            if executable.exists() {
+                return Some(executable);
             }
         }
     }
-
     None
 }
 
 #[cfg(target_os = "linux")]
 fn find_in_standard_locations() -> Result<Option<PathBuf>> {
+    if let Some(cft) = find_chrome_for_testing() {
+        return Ok(Some(cft));
+    }
+
     let paths = [
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
@@ -93,6 +84,27 @@ fn find_in_standard_locations() -> Result<Option<PathBuf>> {
     }
 
     Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn find_chrome_for_testing() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let chrome_dir = PathBuf::from(home)
+        .join(".config/chrome-devtools-cli/chrome-for-testing");
+
+    if !chrome_dir.exists() {
+        return None;
+    }
+
+    let entries = std::fs::read_dir(&chrome_dir).ok()?;
+    for entry in entries.flatten() {
+        let executable = entry.path()
+            .join("chrome-linux64/chrome");
+        if executable.exists() {
+            return Some(executable);
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "windows")]
