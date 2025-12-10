@@ -59,7 +59,7 @@ pub struct BrowserSessionManager {
 
 impl BrowserSessionManager {
     pub fn new(config: Arc<Config>, session_config: SessionConfig) -> Result<Self> {
-        SessionStorage::cleanup_stale(secs::SESSION_MAX_AGE)?;
+        SessionStorage::cleanup_stale(config.storage.session_ttl_hours * 3600)?;
 
         let storage = Self::resolve_storage(&session_config)?;
 

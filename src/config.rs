@@ -20,6 +20,8 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub filters: FilterConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -114,6 +116,24 @@ fn default_console_levels() -> Vec<String> {
 
 fn default_network_max_body_size() -> usize {
     10000
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StorageConfig {
+    #[serde(default = "default_session_ttl_hours")]
+    pub session_ttl_hours: u64,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            session_ttl_hours: default_session_ttl_hours(),
+        }
+    }
+}
+
+fn default_session_ttl_hours() -> u64 {
+    24
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

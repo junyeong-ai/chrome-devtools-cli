@@ -57,7 +57,7 @@ async fn test_extension_binding_receives_events() {
                     println!("Input: {:?} value={:?}", input.target.aria, input.value);
                 }
                 ExtensionEvent::Screenshot(screenshot) => {
-                    println!("Screenshot captured for element: {:?}", screenshot.target);
+                    println!("Screenshot: {} ({:?})", screenshot.filename, screenshot.url);
                 }
                 _ => {
                     println!("Other event type received");
@@ -128,7 +128,7 @@ fn test_extension_event_parsing() {
     }
 
     // Test keypress event
-    let json = r##"{"key_press":{"key":"Enter"}}"##;
+    let json = r##"{"keypress":{"key":"Enter"}}"##;
     let event: ExtensionEvent = serde_json::from_str(json).unwrap();
 
     match event {

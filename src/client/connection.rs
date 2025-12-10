@@ -104,6 +104,18 @@ impl DaemonClient {
         Ok(result.as_array().cloned().unwrap_or_default())
     }
 
+    pub async fn get_user_profile_session_id(&mut self) -> Result<Option<String>> {
+        let sessions = self.list_sessions().await?;
+        for s in sessions {
+            if s.get("uses_user_profile").and_then(|v| v.as_bool()) == Some(true)
+                && let Some(id) = s.get("session_id").and_then(|v| v.as_str())
+            {
+                return Ok(Some(id.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn destroy_session(&mut self, session_id: &str) -> Result<()> {
         self.request(
             "session.destroy",

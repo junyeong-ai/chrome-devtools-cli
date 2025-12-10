@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Represents a saved page entry for session restoration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPageEntry {
     pub target_id: String,
@@ -14,16 +13,12 @@ pub struct BrowserSession {
     pub session_id: String,
     pub debug_port: u16,
     pub created_at: DateTime<Utc>,
-    /// TargetId of the active page for reliable restoration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_page_target_id: Option<String>,
-    /// URL of the active page (fallback for restoration)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_page_url: Option<String>,
-    /// Selected page index for multi-tab persistence
     #[serde(default)]
     pub selected_page_index: usize,
-    /// Full list of pages with their target_ids for order-preserving restoration
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pages: Vec<SavedPageEntry>,
 }
@@ -68,26 +63,6 @@ pub struct CoreWebVitals {
     pub fid_rating: Rating,
     pub cls_rating: Rating,
     pub ttfb_rating: Rating,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserActivity {
-    pub timestamp: DateTime<Utc>,
-    pub activity_type: ActivityType,
-    pub description: String,
-    pub url: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivityType {
-    Navigation,
-    PageLoad,
-    Click,
-    Input,
-    NetworkRequest,
-    ConsoleLog,
-    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,42 +171,6 @@ pub enum Severity {
     High,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VideoRecording {
-    pub file_path: PathBuf,
-    pub format: VideoFormat,
-    pub duration_ms: u64,
-    pub frame_count: usize,
-    pub fps: u32,
-    pub resolution: (u32, u32),
-    pub file_size_bytes: u64,
-    pub recorded_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum VideoFormat {
-    Mp4,
-    Frames,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecordingSession {
-    pub recording: VideoRecording,
-    pub activities: Vec<BrowserActivity>,
-    pub summary: ActivitySummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActivitySummary {
-    pub total_activities: usize,
-    pub pages_visited: Vec<String>,
-    pub navigation_count: usize,
-    pub interaction_count: usize,
-    pub error_count: usize,
-    pub duration_seconds: f64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,23 +240,9 @@ mod tests {
     }
 
     #[test]
-    fn test_activity_type_serialization() {
-        let activity = ActivityType::Navigation;
-        let json = serde_json::to_string(&activity).unwrap();
-        assert_eq!(json, "\"navigation\"");
-    }
-
-    #[test]
     fn test_severity_serialization() {
         let severity = Severity::High;
         let json = serde_json::to_string(&severity).unwrap();
         assert_eq!(json, "\"high\"");
-    }
-
-    #[test]
-    fn test_video_format_serialization() {
-        let format = VideoFormat::Mp4;
-        let json = serde_json::to_string(&format).unwrap();
-        assert_eq!(json, "\"mp4\"");
     }
 }

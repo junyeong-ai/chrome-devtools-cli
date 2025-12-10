@@ -1,13 +1,16 @@
-use crate::chrome::collectors::extension::{ExtensionEvent, TargetInfo};
+use crate::chrome::collectors::{ExtensionEvent, TargetInfo};
 use crate::chrome::storage::SessionStorage;
 use crate::output::OutputFormatter;
 use crate::{ChromeError, Result};
 use serde::Serialize;
 use std::fs;
 
+pub use crate::chrome::collectors::extension::TargetInfo as ElementTarget;
+
 #[derive(Debug, Serialize)]
 pub struct ExportResult {
     pub session_id: String,
+    pub recording_id: Option<String>,
     pub format: String,
     pub events_processed: usize,
     pub output: Option<String>,
@@ -37,6 +40,7 @@ impl OutputFormatter for ExportResult {
 
 pub fn handle_export(
     session_id: &str,
+    recording_id: Option<&str>,
     format: &str,
     output: Option<String>,
 ) -> Result<ExportResult> {
@@ -48,11 +52,22 @@ pub fn handle_export(
     }
 
     let storage = SessionStorage::from_session_id(session_id)?;
-    let events: Vec<ExtensionEvent> = storage.read_all("extension")?;
+    let all_events: Vec<ExtensionEvent> = storage.read_all("extension")?;
+
+    let (events, rec_id) = if let Some(rid) = recording_id {
+        (filter_by_recording(&all_events, rid), Some(rid.to_string()))
+    } else {
+        let rec_id = find_latest_recording_id(&all_events);
+        if let Some(ref rid) = rec_id {
+            (filter_by_recording(&all_events, rid), rec_id)
+        } else {
+            (all_events, None)
+        }
+    };
 
     if events.is_empty() {
         return Err(ChromeError::General(
-            "No extension events recorded in this session".to_string(),
+            "No events found for export".to_string(),
         ));
     }
 
@@ -60,16 +75,62 @@ pub fn handle_export(
 
     if let Some(ref path) = output {
         fs::write(path, &script)
-            .map_err(|e| ChromeError::General(format!("Failed to write file: {}", e)))?;
+            .map_err(|e| ChromeError::General(format!("Failed to write file: {e}")))?;
     }
 
     Ok(ExportResult {
         session_id: session_id.to_string(),
+        recording_id: rec_id,
         format: format.to_string(),
         events_processed: events.len(),
         output,
         script,
     })
+}
+
+fn find_latest_recording_id(events: &[ExtensionEvent]) -> Option<String> {
+    events.iter().rev().find_map(|e| {
+        if let ExtensionEvent::RecordingStart(m) | ExtensionEvent::RecordingStop(m) = e {
+            Some(m.recording_id.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn filter_by_recording(events: &[ExtensionEvent], recording_id: &str) -> Vec<ExtensionEvent> {
+    let mut start_ts: Option<u64> = None;
+    let mut end_ts: Option<u64> = None;
+
+    for event in events {
+        match event {
+            ExtensionEvent::RecordingStart(m) if m.recording_id == recording_id => {
+                start_ts = Some(m.ts);
+            }
+            ExtensionEvent::RecordingStop(m) if m.recording_id == recording_id => {
+                end_ts = Some(m.ts);
+            }
+            _ => {}
+        }
+    }
+
+    let (start, end) = match (start_ts, end_ts) {
+        (Some(s), Some(e)) => (s, e),
+        (Some(s), None) => (s, u64::MAX),
+        _ => return Vec::new(),
+    };
+
+    events
+        .iter()
+        .filter(|e| {
+            if let Some(ts) = e.timestamp_ms() {
+                ts >= start && ts <= end
+            } else {
+                false
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 fn generate_playwright_script(events: &[ExtensionEvent]) -> String {
@@ -93,64 +154,48 @@ fn generate_playwright_script(events: &[ExtensionEvent]) -> String {
 
 fn event_to_playwright(event: &ExtensionEvent, last_url: &mut Option<String>) -> Option<String> {
     match event {
-        ExtensionEvent::Click(click) => {
-            let locator = target_to_locator(click);
+        ExtensionEvent::Navigate(data) => {
+            if last_url.as_ref() != Some(&data.url) {
+                *last_url = Some(data.url.clone());
+                Some(format!("await page.goto('{}');", escape_string(&data.url)))
+            } else {
+                None
+            }
+        }
+        ExtensionEvent::Click(target) => {
+            let locator = target_to_locator(target);
             Some(format!("await {}.click();", locator))
         }
-        ExtensionEvent::Input(input) => {
-            let locator = target_to_locator(&input.target);
-            let value = input.value.as_deref().unwrap_or("");
+        ExtensionEvent::Input(data) => {
+            let locator = target_to_locator(&data.target);
+            let value = data.value.as_deref().unwrap_or("");
             Some(format!(
                 "await {}.fill('{}');",
                 locator,
                 escape_string(value)
             ))
         }
-        ExtensionEvent::Hover(hover) => {
-            let locator = target_to_locator(hover);
-            Some(format!("await {}.hover();", locator))
+        ExtensionEvent::Scroll(data) => {
+            Some(format!("await page.mouse.wheel({}, {});", data.x, data.y))
         }
-        ExtensionEvent::Scroll(scroll) => {
-            if let Some(ref target) = scroll.target {
-                let locator = aria_to_locator(target);
-                Some(format!(
-                    "await {}.evaluate(el => el.scrollBy({}, {}));",
-                    locator, scroll.x, scroll.y
-                ))
-            } else {
-                Some(format!(
-                    "await page.mouse.wheel({}, {});",
-                    scroll.x, scroll.y
-                ))
-            }
-        }
-        ExtensionEvent::KeyPress(key_data) => Some(format!(
+        ExtensionEvent::KeyPress(data) => Some(format!(
             "await page.keyboard.press('{}');",
-            escape_string(&key_data.key)
+            escape_string(&data.key)
         )),
-        ExtensionEvent::Select(select) => {
-            if let Some(ref url) = select.url
-                && last_url.as_ref() != Some(url)
-            {
-                *last_url = Some(url.clone());
-                return Some(format!("await page.goto('{}');", escape_string(url)));
-            }
-            None
+        ExtensionEvent::Select(target) => {
+            let locator = target_to_locator(target);
+            Some(format!("await {}.click();", locator))
         }
-        ExtensionEvent::Navigate(nav) => {
-            if last_url.as_ref() != Some(&nav.url) {
-                *last_url = Some(nav.url.clone());
-                Some(format!("await page.goto('{}');", escape_string(&nav.url)))
-            } else {
-                None
-            }
-        }
-        _ => None,
+        ExtensionEvent::Hover(_)
+        | ExtensionEvent::Screenshot(_)
+        | ExtensionEvent::Snapshot(_)
+        | ExtensionEvent::Dialog(_)
+        | ExtensionEvent::RecordingStart(_)
+        | ExtensionEvent::RecordingStop(_) => None,
     }
 }
 
 fn target_to_locator(target: &TargetInfo) -> String {
-    // Priority: data-testid > ARIA role+name > text > CSS
     if let Some(ref testid) = target.testid {
         return format!("page.getByTestId('{}')", escape_string(testid));
     }
@@ -180,18 +225,6 @@ fn target_to_locator(target: &TargetInfo) -> String {
     "page.locator('body')".to_string()
 }
 
-fn aria_to_locator(aria: &[String]) -> String {
-    if aria.len() >= 2 && !aria[0].is_empty() && !aria[1].is_empty() {
-        format!(
-            "page.getByRole('{}', {{ name: '{}', exact: true }})",
-            escape_string(&aria[0]),
-            escape_string(&aria[1])
-        )
-    } else {
-        "page.locator('body')".to_string()
-    }
-}
-
 fn escape_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
@@ -199,35 +232,35 @@ fn escape_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chrome::collectors::extension::{InputData, KeyPressData};
+    use crate::chrome::collectors::extension::{InputData, KeyPressData, NavigateData};
 
-    #[test]
-    fn test_target_to_locator_testid() {
-        let target = TargetInfo {
-            aria: vec![],
-            css: None,
+    fn make_target(
+        aria: Vec<&str>,
+        testid: Option<&str>,
+        text: Option<&str>,
+        css: Option<&str>,
+    ) -> TargetInfo {
+        TargetInfo {
+            aria: aria.into_iter().map(String::from).collect(),
+            css: css.map(String::from),
             xpath: None,
-            testid: Some("submit-btn".to_string()),
-            text: None,
+            testid: testid.map(String::from),
+            text: text.map(String::from),
             rect: None,
             url: None,
             ts: None,
-        };
+        }
+    }
+
+    #[test]
+    fn test_target_to_locator_testid() {
+        let target = make_target(vec![], Some("submit-btn"), None, None);
         assert_eq!(target_to_locator(&target), "page.getByTestId('submit-btn')");
     }
 
     #[test]
     fn test_target_to_locator_aria() {
-        let target = TargetInfo {
-            aria: vec!["button".to_string(), "Submit".to_string()],
-            css: Some("#btn".to_string()),
-            xpath: None,
-            testid: None,
-            text: Some("Submit".to_string()),
-            rect: None,
-            url: None,
-            ts: None,
-        };
+        let target = make_target(vec!["button", "Submit"], None, Some("Submit"), Some("#btn"));
         assert_eq!(
             target_to_locator(&target),
             "page.getByRole('button', { name: 'Submit', exact: true })"
@@ -236,69 +269,44 @@ mod tests {
 
     #[test]
     fn test_target_to_locator_text() {
-        let target = TargetInfo {
-            aria: vec![],
-            css: Some("#btn".to_string()),
-            xpath: None,
-            testid: None,
-            text: Some("Click me".to_string()),
-            rect: None,
-            url: None,
-            ts: None,
-        };
+        let target = make_target(vec![], None, Some("Click me"), Some("#btn"));
         assert_eq!(target_to_locator(&target), "page.getByText('Click me')");
     }
 
     #[test]
     fn test_target_to_locator_css() {
-        let target = TargetInfo {
-            aria: vec![],
-            css: Some("#submit-btn".to_string()),
-            xpath: None,
-            testid: None,
-            text: None,
-            rect: None,
-            url: None,
-            ts: None,
-        };
+        let target = make_target(vec![], None, None, Some("#submit-btn"));
         assert_eq!(target_to_locator(&target), "page.locator('#submit-btn')");
     }
 
     #[test]
     fn test_generate_playwright_script() {
         let events = vec![
-            ExtensionEvent::Click(TargetInfo {
-                aria: vec!["button".to_string(), "Submit".to_string()],
-                css: None,
-                xpath: None,
-                testid: None,
-                text: None,
-                rect: None,
-                url: None,
-                ts: None,
+            ExtensionEvent::Navigate(NavigateData {
+                url: "https://example.com".to_string(),
+                from: None,
+                nav_type: "link".to_string(),
+                ts: 0,
             }),
+            ExtensionEvent::Click(make_target(vec!["button", "Submit"], None, None, None)),
             ExtensionEvent::Input(InputData {
-                target: TargetInfo {
-                    aria: vec!["textbox".to_string(), "Email".to_string()],
-                    css: None,
-                    xpath: None,
-                    testid: None,
-                    text: None,
-                    rect: None,
-                    url: None,
-                    ts: None,
-                },
+                target: make_target(vec!["textbox", "Email"], None, None, None),
                 value: Some("test@example.com".to_string()),
             }),
             ExtensionEvent::KeyPress(KeyPressData {
                 key: "Enter".to_string(),
-                modifiers: None,
-                ts: None,
+                aria: None,
+                css: None,
+                xpath: None,
+                testid: None,
+                url: None,
+                ts: Some(300),
             }),
         ];
 
         let script = generate_playwright_script(&events);
         assert!(script.contains("import { test, expect }"));
+        assert!(script.contains("page.goto('https://example.com')"));
         assert!(
             script.contains("page.getByRole('button', { name: 'Submit', exact: true }).click()")
         );

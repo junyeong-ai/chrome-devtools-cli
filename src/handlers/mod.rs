@@ -10,7 +10,6 @@ pub mod inspect;
 pub mod navigation;
 pub mod network;
 pub mod performance;
-pub mod recording;
 pub mod screenshot;
 pub mod script;
 pub mod session;

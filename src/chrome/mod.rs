@@ -1,6 +1,7 @@
 pub mod action_executor;
 pub mod collectors;
 pub mod models;
+pub mod recording;
 pub mod session_manager;
 pub mod storage;
 
@@ -14,6 +15,7 @@ pub use collectors::{
     NetworkRequest, PageError,
 };
 pub use models::BrowserSession;
+pub use recording::{FrameInfo, Recording, RecordingDetail, RecordingStatus, RecordingStorage};
 pub use session_manager::{BrowserSessionManager, PageInfo, SessionConfig};
 pub use storage::SessionStorage;
 

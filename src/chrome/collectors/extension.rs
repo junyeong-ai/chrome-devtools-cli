@@ -12,12 +12,35 @@ pub enum ExtensionEvent {
     Select(TargetInfo),
     Hover(TargetInfo),
     Scroll(ScrollData),
+    #[serde(rename = "keypress")]
     KeyPress(KeyPressData),
     Screenshot(ScreenshotData),
-    Recording(RecordingData),
     Snapshot(SnapshotData),
     Dialog(DialogData),
     Navigate(NavigateData),
+    RecordingStart(RecordingMarker),
+    RecordingStop(RecordingMarker),
+}
+
+impl ExtensionEvent {
+    pub fn timestamp_ms(&self) -> Option<u64> {
+        match self {
+            Self::Click(t) | Self::Select(t) | Self::Hover(t) => t.ts,
+            Self::Input(d) => d.target.ts,
+            Self::Scroll(d) => d.ts,
+            Self::KeyPress(d) => d.ts,
+            Self::Screenshot(d) => d.ts,
+            Self::Navigate(d) => Some(d.ts),
+            Self::RecordingStart(m) | Self::RecordingStop(m) => Some(m.ts),
+            Self::Snapshot(_) | Self::Dialog(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordingMarker {
+    pub recording_id: String,
+    pub ts: u64,
 }
 
 pub type AriaTarget = Vec<String>;
@@ -80,7 +103,15 @@ pub struct ScrollData {
 pub struct KeyPressData {
     pub key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub modifiers: Option<Vec<String>>,
+    pub aria: Option<AriaTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub css: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xpath: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub testid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<u64>,
 }
@@ -97,22 +128,15 @@ pub struct NavigateData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenshotData {
+    pub filename: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub target: Option<AriaTarget>,
+    pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<String>,
+    pub element: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
+    pub bounds: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum RecordingData {
-    Start { fps: u32 },
-    Stop { frames: u32, ms: u64 },
-    Frame { i: u32, data: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
