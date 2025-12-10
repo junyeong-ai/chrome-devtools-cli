@@ -54,30 +54,36 @@ chrome.runtime.onMessage.addListener((message, _, sendResponse) => {
   switch (message.type) {
     case 'start_selection':
       startSelection(message.mode, message.filter);
-      break;
+      sendResponse({ ok: true });
+      return false;
     case 'cancel_selection':
       cancelSelection();
-      break;
+      sendResponse({ ok: true });
+      return false;
     case 'highlight':
       highlightElement(message.selector, message.color);
-      break;
+      sendResponse({ ok: true });
+      return false;
     case 'clear_highlight':
       clearAllOverlays();
-      break;
+      sendResponse({ ok: true });
+      return false;
     case 'get_snapshot':
-      if (isTopFrame) sendResponse(captureSnapshot(message.verbose));
-      break;
+      sendResponse(isTopFrame ? captureSnapshot(message.verbose) : { ok: false, error: 'Not top frame' });
+      return false;
     case 'get_a11y_tree':
-      if (isTopFrame) sendResponse(getA11yTree());
-      break;
+      sendResponse(isTopFrame ? getA11yTree() : { ok: false, error: 'Not top frame' });
+      return false;
     case 'start_recording':
       sendResponse({ ok: true });
-      break;
+      return false;
     case 'stop_recording':
       sendResponse({ ok: true });
-      break;
+      return false;
+    default:
+      // Unknown message type - do not handle
+      return false;
   }
-  return true;
 });
 
 if (isTopFrame) {
@@ -728,9 +734,9 @@ function generateUid(element: Element): string {
   let current: Element | null = element;
 
   while (current && current !== document.documentElement) {
-    const parent = current.parentElement;
-    if (parent) path.unshift(Array.from(parent.children).indexOf(current));
-    current = parent;
+    const parentNode: Element | null = current.parentElement;
+    if (parentNode) path.unshift(Array.from(parentNode.children).indexOf(current));
+    current = parentNode;
   }
 
   return path.join('.');
@@ -817,9 +823,10 @@ function generatePathSelector(element: Element): string {
       selector += '.' + classList.slice(0, 2).map((c) => CSS.escape(c)).join('.');
     }
 
-    const parent = current.parentElement;
-    if (parent) {
-      const siblings = Array.from(parent.children).filter((el) => {
+    const parentNode: Element | null = current.parentElement;
+    if (parentNode) {
+      const children = Array.from(parentNode.children) as Element[];
+      const siblings = children.filter((el) => {
         if (el.tagName !== current!.tagName) return false;
         if (classList.length > 0) {
           return classList.every((c) => el.classList.contains(c));
@@ -828,12 +835,12 @@ function generatePathSelector(element: Element): string {
       });
 
       if (siblings.length > 1) {
-        selector += `:nth-child(${Array.from(parent.children).indexOf(current) + 1})`;
+        selector += `:nth-child(${children.indexOf(current) + 1})`;
       }
     }
 
     parts.unshift(selector);
-    current = parent;
+    current = parentNode;
   }
 
   return parts.join(' > ');

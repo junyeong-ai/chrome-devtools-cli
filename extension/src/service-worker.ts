@@ -5,12 +5,7 @@ const MAX_RETRIES = 3;
 const RECORDING_STATE_KEY = 'recordingState';
 const TRACE_STATE_KEY = 'traceState';
 
-let sessionId: string | null = null;
-let recording: RecordingState | null = null;
-let recordingInterval: ReturnType<typeof setInterval> | null = null;
-let tracing: TraceState | null = null;
-
-interface RecordingState {
+interface ScreenRecordingState {
   id: string;
   tabId: number;
   windowId: number;
@@ -23,12 +18,17 @@ interface RecordingState {
   frames: string[];
 }
 
-interface TraceState {
+interface PerformanceTraceState {
   id: string;
   tabId: number;
   isActive: boolean;
   startTime: number;
 }
+
+let sessionId: string | null = null;
+let recording: ScreenRecordingState | null = null;
+let recordingInterval: ReturnType<typeof setInterval> | null = null;
+let tracing: PerformanceTraceState | null = null;
 
 async function saveRecordingState(): Promise<void> {
   if (recording) {
@@ -858,7 +858,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     case 'capture_screenshot':
       (async () => {
         try {
-          const dataUrl = await chrome.tabs.captureVisibleTab(undefined, { format: 'png' });
+          const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'png' });
           sendResponse({ dataUrl });
         } catch {
           sendResponse({ dataUrl: null });
@@ -881,12 +881,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
       return true;
 
-    case 'user_action': {
-      const action = message.action;
-      sendSessionEvent(action);
+    case 'user_action':
+      sendSessionEvent(message.action);
       return false;
-    }
-  }
 
-  return true;
+    default:
+      // Unknown message type - do not indicate async response
+      return false;
+  }
 });
