@@ -1,15 +1,17 @@
 const API_BASE = 'http://127.0.0.1:9223';
-const MIN_CAPTURE_INTERVAL = 1000;
+const MIN_CAPTURE_INTERVAL = 100;
 const RETRY_DELAY = 300;
 const MAX_RETRIES = 3;
+const RECORDING_STATE_KEY = 'recordingState';
+const TRACE_STATE_KEY = 'traceState';
 
 let sessionId: string | null = null;
 let recording: RecordingState | null = null;
 let recordingInterval: ReturnType<typeof setInterval> | null = null;
-let lastCaptureTime = 0;
+let tracing: TraceState | null = null;
 
 interface RecordingState {
-  sessionId: string;
+  id: string;
   tabId: number;
   windowId: number;
   isActive: boolean;
@@ -20,6 +22,70 @@ interface RecordingState {
   startTime: number;
   frames: string[];
 }
+
+interface TraceState {
+  id: string;
+  tabId: number;
+  isActive: boolean;
+  startTime: number;
+}
+
+async function saveRecordingState(): Promise<void> {
+  if (recording) {
+    const { frames, ...stateWithoutFrames } = recording;
+    await chrome.storage.session.set({ [RECORDING_STATE_KEY]: stateWithoutFrames });
+  } else {
+    await chrome.storage.session.remove(RECORDING_STATE_KEY);
+  }
+}
+
+async function restoreRecordingState(): Promise<void> {
+  if (recording) return;
+
+  const result = await chrome.storage.session.get(RECORDING_STATE_KEY);
+  const savedState = result[RECORDING_STATE_KEY];
+
+  if (savedState?.isActive) {
+    recording = { ...savedState, frames: [] };
+    startFrameCapture();
+  }
+}
+
+function startFrameCapture(): void {
+  if (!recording?.isActive || recordingInterval) return;
+
+  const captureInterval = Math.max(1000 / recording.fps, MIN_CAPTURE_INTERVAL);
+
+  recordingInterval = setInterval(async () => {
+    if (!recording?.isActive) {
+      if (recordingInterval) {
+        clearInterval(recordingInterval);
+        recordingInterval = null;
+      }
+      return;
+    }
+
+    try {
+      const dataUrl = await chrome.tabs.captureVisibleTab(recording.windowId, {
+        format: 'jpeg',
+        quality: recording.quality,
+      });
+
+      if (recording?.isActive && dataUrl) {
+        const resized = await resizeToLogicalPixels(dataUrl, recording.quality, recording.dpr);
+        const offsetMs = Date.now() - recording.startTime;
+        recording.frames.push(resized);
+        sendFrame(recording.id, recording.frameCount, offsetMs, resized);
+        recording.frameCount++;
+        if (recording.frameCount % 10 === 0) {
+          saveRecordingState();
+        }
+      }
+    } catch {}
+  }, captureInterval);
+}
+
+restoreRecordingState();
 
 interface ElementInfo {
   selector: string;
@@ -60,29 +126,20 @@ async function getActiveTab(): Promise<chrome.tabs.Tab | null> {
   return tab?.id ? tab : null;
 }
 
-async function sendToContent(tabId: number, message: object): Promise<unknown> {
-  try {
-    return await chrome.tabs.sendMessage(tabId, message);
-  } catch {
-    return null;
-  }
-}
-
-async function sendToContentWithRetry(tabId: number, message: object): Promise<boolean> {
-  for (let i = 0; i < MAX_RETRIES; i++) {
+async function sendToContent(tabId: number, message: object, maxRetries = MAX_RETRIES): Promise<unknown> {
+  for (let i = 0; i < maxRetries; i++) {
     try {
-      await chrome.tabs.sendMessage(tabId, message);
-      return true;
+      return await chrome.tabs.sendMessage(tabId, message);
     } catch {
-      if (i < MAX_RETRIES - 1) {
+      if (i < maxRetries - 1) {
         await new Promise(r => setTimeout(r, RETRY_DELAY));
       }
     }
   }
-  return false;
+  return null;
 }
 
-async function api(endpoint: string, data: object): Promise<{ ok: boolean; error?: string }> {
+async function api(endpoint: string, data: object): Promise<{ ok: boolean; error?: string; recording_id?: string }> {
   const sid = await getSessionId();
   try {
     const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -96,20 +153,59 @@ async function api(endpoint: string, data: object): Promise<{ ok: boolean; error
   }
 }
 
-async function sendEvent(event: object): Promise<boolean> {
+async function startRecordingOnServer(fps: number, quality: number): Promise<string | null> {
+  const result = await api('/api/recording/start', { fps, quality });
+  return result.ok ? result.recording_id ?? null : null;
+}
+
+async function stopRecordingOnServer(recordingId: string, frameCount: number, durationMs: number): Promise<boolean> {
+  const result = await api('/api/recording/stop', { recording_id: recordingId, frame_count: frameCount, duration_ms: durationMs });
+  return result.ok;
+}
+
+async function sendFrame(recordingId: string, index: number, offsetMs: number, data: string): Promise<boolean> {
+  const result = await api('/api/recording/frame', { recording_id: recordingId, index, offset_ms: offsetMs, data });
+  return result.ok;
+}
+
+async function sendSessionEvent(event: object): Promise<boolean> {
   const result = await api('/api/events', { event });
   return result.ok;
 }
 
-async function sendFrame(index: number, data: string): Promise<boolean> {
-  const result = await api('/api/frames', { index, data });
+async function sendScreenshot(data: string, filename?: string): Promise<boolean> {
+  const result = await api('/api/screenshots', { data, filename });
   return result.ok;
 }
 
-async function sendScreenshot(data: string): Promise<boolean> {
-  const result = await api('/api/screenshots', { data });
-  return result.ok;
+async function startTraceOnServer(): Promise<string | null> {
+  const result = await api('/api/trace/start', {});
+  return result.ok ? (result as { trace_id?: string }).trace_id ?? null : null;
 }
+
+async function stopTraceOnServer(): Promise<{ trace_id?: string; event_count?: number } | null> {
+  const result = await api('/api/trace/stop', {});
+  return result.ok ? result as { trace_id?: string; event_count?: number } : null;
+}
+
+async function saveTraceState(): Promise<void> {
+  if (tracing) {
+    await chrome.storage.session.set({ [TRACE_STATE_KEY]: tracing });
+  } else {
+    await chrome.storage.session.remove(TRACE_STATE_KEY);
+  }
+}
+
+async function restoreTraceState(): Promise<void> {
+  if (tracing) return;
+  const result = await chrome.storage.session.get(TRACE_STATE_KEY);
+  const savedState = result[TRACE_STATE_KEY];
+  if (savedState?.isActive) {
+    tracing = savedState;
+  }
+}
+
+restoreTraceState();
 
 async function checkDaemonConnection(): Promise<boolean> {
   try {
@@ -119,15 +215,6 @@ async function checkDaemonConnection(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-async function waitForCaptureSlot(): Promise<void> {
-  const now = Date.now();
-  const elapsed = now - lastCaptureTime;
-  if (elapsed < MIN_CAPTURE_INTERVAL) {
-    await new Promise(r => setTimeout(r, MIN_CAPTURE_INTERVAL - elapsed));
-  }
-  lastCaptureTime = Date.now();
 }
 
 async function executeCommand(cmd: { type: string; [key: string]: unknown }): Promise<unknown> {
@@ -158,12 +245,17 @@ async function executeCommand(cmd: { type: string; [key: string]: unknown }): Pr
         tab.id,
         tab.windowId!,
         (cmd.fps as number) || 5,
-        (cmd.quality as number) || 70,
-        (cmd.trackActions as boolean) ?? true
+        (cmd.quality as number) || 70
       );
 
     case 'stop_recording':
       return await stopRecording();
+
+    case 'start_trace':
+      return await startTrace(tab.id);
+
+    case 'stop_trace':
+      return await stopTrace();
 
     case 'highlight':
       await sendToContent(tab.id, { type: 'highlight', selector: cmd.selector, color: cmd.color });
@@ -181,15 +273,24 @@ async function executeCommand(cmd: { type: string; [key: string]: unknown }): Pr
 async function captureScreenshot(options: ScreenshotOptions): Promise<object> {
   const { tabId, bounds, elementInfo } = options;
 
-  await waitForCaptureSlot();
-
   try {
     const tab = await chrome.tabs.get(tabId);
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
     if (!dataUrl) return { error: 'Capture failed' };
 
     const finalDataUrl = bounds ? await cropImage(dataUrl, bounds) : dataUrl;
-    sendScreenshot(finalDataUrl);
+    const filename = `screenshot_${Date.now()}.png`;
+
+    sendScreenshot(finalDataUrl, filename);
+    sendSessionEvent({
+      screenshot: {
+        filename,
+        url: tab.url,
+        element: elementInfo,
+        bounds,
+        ts: Date.now(),
+      },
+    });
     showScreenshotDialog(tabId, finalDataUrl, elementInfo);
 
     return { success: true, dataUrl: finalDataUrl };
@@ -260,17 +361,21 @@ async function startRecording(
   tabId: number,
   windowId: number,
   fps: number,
-  quality: number,
-  trackActions: boolean
+  quality: number
 ): Promise<object> {
   if (recording?.isActive) {
     return { error: 'Already recording' };
   }
 
+  const recordingId = await startRecordingOnServer(fps, quality);
+  if (!recordingId) {
+    return { error: 'Failed to start recording on server' };
+  }
+
   const dpr = await getDpr(tabId);
 
   recording = {
-    sessionId: crypto.randomUUID(),
+    id: recordingId,
     tabId,
     windowId,
     isActive: true,
@@ -282,45 +387,11 @@ async function startRecording(
     frames: [],
   };
 
-  await sendEvent({ recording: { type: 'start', fps } });
-
-  if (trackActions) {
-    await sendToContent(tabId, { type: 'start_recording' });
-  }
-
+  await saveRecordingState();
   await showRecordingIndicator(tabId);
+  startFrameCapture();
 
-  const captureInterval = Math.max(1000 / fps, MIN_CAPTURE_INTERVAL);
-
-  recordingInterval = setInterval(async () => {
-    if (!recording?.isActive) {
-      if (recordingInterval) {
-        clearInterval(recordingInterval);
-        recordingInterval = null;
-      }
-      return;
-    }
-
-    const now = Date.now();
-    if (now - lastCaptureTime < MIN_CAPTURE_INTERVAL) return;
-    lastCaptureTime = now;
-
-    try {
-      const dataUrl = await chrome.tabs.captureVisibleTab(recording.windowId, {
-        format: 'jpeg',
-        quality: recording.quality,
-      });
-
-      if (recording?.isActive && dataUrl) {
-        const resized = await resizeToLogicalPixels(dataUrl, recording.quality, recording.dpr);
-        recording.frames.push(resized);
-        recording.frameCount++;
-        sendFrame(recording.frameCount - 1, resized);
-      }
-    } catch {}
-  }, captureInterval);
-
-  return { success: true, sessionId: recording.sessionId };
+  return { success: true, recording_id: recordingId };
 }
 
 async function stopRecording(): Promise<object> {
@@ -328,7 +399,7 @@ async function stopRecording(): Promise<object> {
     return { error: 'Not recording' };
   }
 
-  const { tabId, sessionId: recSessionId, frameCount, startTime, frames, fps } = recording;
+  const { id, tabId, frameCount, startTime, frames, fps } = recording;
   recording.isActive = false;
 
   if (recordingInterval) {
@@ -337,15 +408,116 @@ async function stopRecording(): Promise<object> {
   }
 
   await hideRecordingIndicator(tabId);
-  await sendToContent(tabId, { type: 'stop_recording' });
 
   const durationMs = Date.now() - startTime;
-  await sendEvent({ recording: { type: 'stop', frames: frameCount, ms: durationMs } });
+  await stopRecordingOnServer(id, frameCount, durationMs);
   showRecordingPreview(tabId, frames, fps, durationMs);
 
+  const result = { recording_id: id, frameCount, durationMs };
   recording = null;
 
-  return { sessionId: recSessionId, frameCount, durationMs };
+  await saveRecordingState();
+
+  return result;
+}
+
+async function startTrace(tabId: number): Promise<object> {
+  if (tracing?.isActive) {
+    return { error: 'Already tracing' };
+  }
+
+  const traceId = await startTraceOnServer();
+  if (!traceId) {
+    return { error: 'Failed to start trace on server' };
+  }
+
+  tracing = {
+    id: traceId,
+    tabId,
+    isActive: true,
+    startTime: Date.now(),
+  };
+
+  await saveTraceState();
+  await showTraceIndicator(tabId);
+
+  return { success: true, trace_id: traceId };
+}
+
+async function stopTrace(): Promise<object> {
+  if (!tracing) {
+    return { error: 'Not tracing' };
+  }
+
+  const { tabId, startTime } = tracing;
+  tracing.isActive = false;
+
+  await hideTraceIndicator(tabId);
+
+  const serverResult = await stopTraceOnServer();
+  const durationMs = Date.now() - startTime;
+
+  const result = {
+    trace_id: serverResult?.trace_id,
+    event_count: serverResult?.event_count,
+    durationMs,
+  };
+  tracing = null;
+
+  await saveTraceState();
+
+  return result;
+}
+
+async function showTraceIndicator(tabId: number): Promise<void> {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        document.getElementById('__cdtcli_trace__')?.remove();
+        document.getElementById('__cdtcli_trace_style__')?.remove();
+
+        const indicator = document.createElement('div');
+        indicator.id = '__cdtcli_trace__';
+        indicator.innerHTML = `
+          <span style="display:inline-block;width:8px;height:8px;background:#3b82f6;border-radius:50%;margin-right:8px;animation:__cdtcli_trace_pulse__ 1s infinite"></span>
+          <span>Tracing</span>
+          <span style="margin-left:12px;padding:2px 8px;background:rgba(255,255,255,0.15);border-radius:4px;font-size:12px">Click to stop</span>
+        `;
+        indicator.style.cssText =
+          'position:fixed;top:16px;right:16px;padding:8px 16px;background:#1e40af;color:#fff;font:14px/1.4 system-ui,sans-serif;border-radius:8px;z-index:2147483647;box-shadow:0 4px 16px rgba(0,0,0,0.3);cursor:pointer;display:flex;align-items:center;user-select:none';
+
+        indicator.addEventListener('click', () => {
+          chrome.runtime.sendMessage({ type: 'execute_local', command: { type: 'stop_trace' } });
+        });
+
+        indicator.addEventListener('mouseenter', () => {
+          indicator.style.background = '#1e3a8a';
+        });
+        indicator.addEventListener('mouseleave', () => {
+          indicator.style.background = '#1e40af';
+        });
+
+        const style = document.createElement('style');
+        style.id = '__cdtcli_trace_style__';
+        style.textContent = '@keyframes __cdtcli_trace_pulse__{0%,100%{opacity:1}50%{opacity:0.5}}';
+        document.head.appendChild(style);
+        document.body.appendChild(indicator);
+      },
+    });
+  } catch {}
+}
+
+async function hideTraceIndicator(tabId: number): Promise<void> {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        document.getElementById('__cdtcli_trace__')?.remove();
+        document.getElementById('__cdtcli_trace_style__')?.remove();
+      },
+    });
+  } catch {}
 }
 
 async function showRecordingIndicator(tabId: number): Promise<void> {
@@ -405,10 +577,10 @@ function showScreenshotDialog(tabId: number, dataUrl: string, elementInfo?: Elem
     func: (dataUrl: string, elementInfo: ElementInfo | null) => {
       document.getElementById('__cdtcli_dialog__')?.remove();
 
-      const overlay = document.createElement('div');
-      overlay.id = '__cdtcli_dialog__';
-      overlay.style.cssText =
-        'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:2147483647;display:flex;align-items:center;justify-content:center';
+      const host = document.createElement('div');
+      host.id = '__cdtcli_dialog__';
+      host.style.cssText = 'all:initial;position:fixed;inset:0;z-index:2147483647';
+      const shadow = host.attachShadow({ mode: 'closed' });
 
       let infoSection = '';
       if (elementInfo) {
@@ -438,54 +610,69 @@ function showScreenshotDialog(tabId: number, dataUrl: string, elementInfo?: Elem
         `;
       }
 
-      overlay.innerHTML = `
-        <div style="background:#fff;border-radius:8px;max-width:90vw;max-height:90vh;box-shadow:0 4px 24px rgba(0,0,0,0.2);font-family:system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden">
-          <div style="padding:12px 16px;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#fafafa">
-            <span style="font-size:14px;font-weight:500;color:#333">${elementInfo ? 'Element Screenshot' : 'Screenshot'}</span>
-            <button id="__close__" style="width:28px;height:28px;border:none;background:transparent;cursor:pointer;font-size:18px;color:#666;display:flex;align-items:center;justify-content:center;border-radius:4px" onmouseover="this.style.background='#eee'" onmouseout="this.style.background='transparent'">×</button>
-          </div>
-          ${infoSection}
-          <div style="padding:16px;overflow:auto;flex:1;background:#f0f0f0;display:flex;align-items:center;justify-content:center">
-            <img src="${dataUrl}" style="max-width:100%;max-height:60vh;box-shadow:0 2px 8px rgba(0,0,0,0.15)" />
-          </div>
-          <div style="padding:12px 16px;border-top:1px solid #e0e0e0;display:flex;gap:8px;justify-content:flex-end;background:#fafafa">
-            <button id="__copy__" style="padding:8px 16px;background:#fff;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:13px">Copy Image</button>
-            <button id="__download__" style="padding:8px 16px;background:#1a73e8;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px">Download</button>
+      shadow.innerHTML = `
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          .overlay { position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,sans-serif }
+          .dialog { background:#fff;border-radius:8px;max-width:90vw;max-height:90vh;box-shadow:0 4px 24px rgba(0,0,0,0.2);display:flex;flex-direction:column;overflow:hidden }
+          .header { padding:12px 16px;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#fafafa }
+          .title { font-size:14px;font-weight:500;color:#333 }
+          .close-btn { width:28px;height:28px;border:none;background:transparent;cursor:pointer;font-size:18px;color:#666;display:flex;align-items:center;justify-content:center;border-radius:4px }
+          .close-btn:hover { background:#eee }
+          .image-container { padding:16px;overflow:auto;flex:1;background:#f0f0f0;display:flex;align-items:center;justify-content:center }
+          .image-container img { max-width:100%;max-height:60vh;box-shadow:0 2px 8px rgba(0,0,0,0.15) }
+          .footer { padding:12px 16px;border-top:1px solid #e0e0e0;display:flex;gap:8px;justify-content:flex-end;background:#fafafa }
+          .btn { padding:8px 16px;border-radius:4px;cursor:pointer;font-size:13px;border:1px solid #ccc;background:#fff }
+          .btn:hover { background:#f5f5f5 }
+          .btn-primary { background:#1a73e8;color:white;border:none }
+          .btn-primary:hover { background:#1557b0 }
+        </style>
+        <div class="overlay">
+          <div class="dialog">
+            <div class="header">
+              <span class="title">${elementInfo ? 'Element Screenshot' : 'Screenshot'}</span>
+              <button class="close-btn" id="__close__">×</button>
+            </div>
+            ${infoSection}
+            <div class="image-container">
+              <img src="${dataUrl}" />
+            </div>
+            <div class="footer">
+              <button class="btn" id="__copy__">Copy Image</button>
+              <button class="btn btn-primary" id="__download__">Download</button>
+            </div>
           </div>
         </div>
       `;
 
-      document.body.appendChild(overlay);
-      overlay.addEventListener('click', e => e.stopPropagation(), true);
+      document.body.appendChild(host);
 
-      const close = () => overlay.remove();
-      overlay.querySelector('#__close__')?.addEventListener('click', close);
+      const overlay = shadow.querySelector('.overlay') as HTMLElement;
+      const close = () => host.remove();
+
+      shadow.getElementById('__close__')?.addEventListener('click', close);
       overlay.addEventListener('click', e => e.target === overlay && close());
 
-      overlay.querySelector('#__copy_selector__')?.addEventListener('click', () => {
-        const input = overlay.querySelector('#__selector_input__') as HTMLInputElement;
+      shadow.getElementById('__copy_selector__')?.addEventListener('click', () => {
+        const input = shadow.getElementById('__selector_input__') as HTMLInputElement;
         navigator.clipboard.writeText(input.value);
-        (overlay.querySelector('#__copy_selector__') as HTMLButtonElement).textContent = 'Copied!';
-        setTimeout(() => {
-          const btn = overlay.querySelector('#__copy_selector__') as HTMLButtonElement;
-          if (btn) btn.textContent = 'Copy';
-        }, 1500);
+        const btn = shadow.getElementById('__copy_selector__') as HTMLButtonElement;
+        btn.textContent = 'Copied!';
+        setTimeout(() => { if (btn) btn.textContent = 'Copy'; }, 1500);
       });
 
-      overlay.querySelector('#__copy__')?.addEventListener('click', async () => {
+      shadow.getElementById('__copy__')?.addEventListener('click', async () => {
         try {
           const res = await fetch(dataUrl);
           const blob = await res.blob();
           await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-          (overlay.querySelector('#__copy__') as HTMLButtonElement).textContent = 'Copied!';
-          setTimeout(() => {
-            const btn = overlay.querySelector('#__copy__') as HTMLButtonElement;
-            if (btn) btn.textContent = 'Copy Image';
-          }, 1500);
+          const btn = shadow.getElementById('__copy__') as HTMLButtonElement;
+          btn.textContent = 'Copied!';
+          setTimeout(() => { if (btn) btn.textContent = 'Copy Image'; }, 1500);
         } catch {}
       });
 
-      overlay.querySelector('#__download__')?.addEventListener('click', () => {
+      shadow.getElementById('__download__')?.addEventListener('click', () => {
         const a = document.createElement('a');
         a.href = dataUrl;
         a.download = `screenshot_${Date.now()}.png`;
@@ -502,64 +689,93 @@ function showRecordingPreview(tabId: number, frames: string[], fps: number, dura
     func: (frames: string[], fps: number, durationMs: number) => {
       document.getElementById('__cdtcli_dialog__')?.remove();
 
-      const overlay = document.createElement('div');
-      overlay.id = '__cdtcli_dialog__';
-      overlay.style.cssText =
-        'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:2147483647;display:flex;align-items:center;justify-content:center';
+      const host = document.createElement('div');
+      host.id = '__cdtcli_dialog__';
+      host.style.cssText = 'all:initial;position:fixed;inset:0;z-index:2147483647';
+      const shadow = host.attachShadow({ mode: 'closed' });
 
       const durationSec = (durationMs / 1000).toFixed(1);
       const hasFrames = frames.length > 0;
 
       const playerSection = hasFrames
-        ? `<img id="__player__" style="max-width:100%;max-height:100%" />`
-        : `<div style="color:#999;font-size:14px">No frames captured</div>`;
+        ? `<img id="__player__" class="player" />`
+        : `<div class="no-frames">No frames captured</div>`;
 
       const controlsSection = hasFrames
-        ? `<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid #e0e0e0;background:#fafafa">
-            <button id="__play__" style="width:36px;height:36px;border:none;background:#1a73e8;color:white;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center">▶</button>
-            <input id="__slider__" type="range" min="0" max="${frames.length - 1}" value="0" style="flex:1" />
-            <span id="__time__" style="font-size:12px;color:#666;min-width:70px;text-align:right">1 / ${frames.length}</span>
+        ? `<div class="controls">
+            <button id="__play__" class="play-btn">▶</button>
+            <input id="__slider__" type="range" min="0" max="${frames.length - 1}" value="0" class="slider" />
+            <span id="__time__" class="time">1 / ${frames.length}</span>
           </div>`
         : '';
 
-      overlay.innerHTML = `
-        <div style="background:#fff;border-radius:8px;max-width:800px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,0.2);font-family:system-ui,sans-serif;overflow:hidden">
-          <div style="padding:12px 16px;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#fafafa">
-            <span style="font-size:14px;font-weight:500;color:#333">Recording Complete</span>
-            <button id="__close__" style="width:28px;height:28px;border:none;background:transparent;cursor:pointer;font-size:18px;color:#666;display:flex;align-items:center;justify-content:center;border-radius:4px">×</button>
-          </div>
-          <div style="background:#1a1a1a;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center">
-            ${playerSection}
-          </div>
-          ${controlsSection}
-          <div style="display:flex;border-top:1px solid #e0e0e0">
-            <div style="flex:1;padding:16px;text-align:center;border-right:1px solid #e0e0e0">
-              <div style="font-size:24px;font-weight:600;color:#333">${frames.length}</div>
-              <div style="font-size:12px;color:#666;margin-top:4px">Frames</div>
+      shadow.innerHTML = `
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          .overlay { position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,sans-serif }
+          .dialog { background:#fff;border-radius:8px;max-width:800px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,0.2);overflow:hidden }
+          .header { padding:12px 16px;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#fafafa }
+          .title { font-size:14px;font-weight:500;color:#333 }
+          .close-btn { width:28px;height:28px;border:none;background:transparent;cursor:pointer;font-size:18px;color:#666;display:flex;align-items:center;justify-content:center;border-radius:4px }
+          .close-btn:hover { background:#eee }
+          .video-container { background:#1a1a1a;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center }
+          .player { max-width:100%;max-height:100% }
+          .no-frames { color:#999;font-size:14px }
+          .controls { display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid #e0e0e0;background:#fafafa }
+          .play-btn { width:36px;height:36px;border:none;background:#1a73e8;color:white;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center }
+          .play-btn:hover { background:#1557b0 }
+          .slider { flex:1 }
+          .time { font-size:12px;color:#666;min-width:70px;text-align:right }
+          .stats { display:flex;border-top:1px solid #e0e0e0 }
+          .stat { flex:1;padding:16px;text-align:center }
+          .stat:first-child { border-right:1px solid #e0e0e0 }
+          .stat-value { font-size:24px;font-weight:600;color:#333 }
+          .stat-label { font-size:12px;color:#666;margin-top:4px }
+          .footer { padding:12px 16px;border-top:1px solid #e0e0e0;display:flex;gap:8px;justify-content:flex-end;background:#fafafa }
+          .btn { padding:8px 16px;border-radius:4px;cursor:pointer;font-size:13px;border:none;background:#1a73e8;color:white }
+          .btn:hover { background:#1557b0 }
+          .btn:disabled { background:#ccc;cursor:not-allowed }
+        </style>
+        <div class="overlay">
+          <div class="dialog">
+            <div class="header">
+              <span class="title">Recording Complete</span>
+              <button class="close-btn" id="__close__">×</button>
             </div>
-            <div style="flex:1;padding:16px;text-align:center">
-              <div style="font-size:24px;font-weight:600;color:#333">${durationSec}s</div>
-              <div style="font-size:12px;color:#666;margin-top:4px">Duration</div>
+            <div class="video-container">
+              ${playerSection}
             </div>
-          </div>
-          <div style="padding:12px 16px;border-top:1px solid #e0e0e0;display:flex;gap:8px;justify-content:flex-end;background:#fafafa">
-            <button id="__download__" style="padding:8px 16px;background:${hasFrames ? '#1a73e8' : '#ccc'};color:white;border:none;border-radius:4px;cursor:${hasFrames ? 'pointer' : 'not-allowed'};font-size:13px" ${!hasFrames ? 'disabled' : ''}>Download</button>
+            ${controlsSection}
+            <div class="stats">
+              <div class="stat">
+                <div class="stat-value">${frames.length}</div>
+                <div class="stat-label">Frames</div>
+              </div>
+              <div class="stat">
+                <div class="stat-value">${durationSec}s</div>
+                <div class="stat-label">Duration</div>
+              </div>
+            </div>
+            <div class="footer">
+              <button class="btn" id="__download__" ${!hasFrames ? 'disabled' : ''}>Download</button>
+            </div>
           </div>
         </div>
       `;
 
-      document.body.appendChild(overlay);
-      overlay.addEventListener('click', e => e.stopPropagation(), true);
+      document.body.appendChild(host);
 
-      const close = () => overlay.remove();
-      overlay.querySelector('#__close__')?.addEventListener('click', close);
+      const overlay = shadow.querySelector('.overlay') as HTMLElement;
+      const close = () => host.remove();
+
+      shadow.getElementById('__close__')?.addEventListener('click', close);
       overlay.addEventListener('click', e => e.target === overlay && close());
 
       if (hasFrames) {
-        const player = overlay.querySelector('#__player__') as HTMLImageElement;
-        const slider = overlay.querySelector('#__slider__') as HTMLInputElement;
-        const timeDisplay = overlay.querySelector('#__time__') as HTMLElement;
-        const playBtn = overlay.querySelector('#__play__') as HTMLButtonElement;
+        const player = shadow.getElementById('__player__') as HTMLImageElement;
+        const slider = shadow.getElementById('__slider__') as HTMLInputElement;
+        const timeDisplay = shadow.getElementById('__time__') as HTMLElement;
+        const playBtn = shadow.getElementById('__play__') as HTMLButtonElement;
 
         let playing = false;
         let currentFrame = 0;
@@ -592,7 +808,7 @@ function showRecordingPreview(tabId: number, frames: string[], fps: number, dura
           }
         });
 
-        overlay.querySelector('#__download__')?.addEventListener('click', () => {
+        shadow.getElementById('__download__')?.addEventListener('click', () => {
           const a = document.createElement('a');
           a.href = frames[0];
           a.download = `recording_${Date.now()}.jpg`;
@@ -608,8 +824,14 @@ chrome.webNavigation.onCompleted.addListener(async details => {
   if (details.frameId !== 0 || details.url.startsWith('chrome://')) return;
 
   if (recording?.isActive && details.tabId === recording.tabId) {
-    await new Promise(r => setTimeout(r, 500));
-    await sendToContentWithRetry(details.tabId, { type: 'start_recording' });
+    sendSessionEvent({
+      navigate: {
+        url: details.url,
+        from: null,
+        type: 'page_load',
+        ts: Date.now(),
+      },
+    });
     await showRecordingIndicator(details.tabId);
   }
 });
@@ -624,6 +846,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       Promise.all([checkDaemonConnection(), getSessionId()]).then(([daemonConnected, sid]) => {
         sendResponse({
           recording: recording?.isActive ?? false,
+          recording_id: recording?.id ?? null,
+          tracing: tracing?.isActive ?? false,
+          trace_id: tracing?.id ?? null,
           daemonConnected,
           sessionId: sid
         });
@@ -632,7 +857,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     case 'capture_screenshot':
       (async () => {
-        await waitForCaptureSlot();
         try {
           const dataUrl = await chrome.tabs.captureVisibleTab(undefined, { format: 'png' });
           sendResponse({ dataUrl });
@@ -657,9 +881,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
       return true;
 
-    case 'user_action':
-      sendEvent(message.action);
+    case 'user_action': {
+      const action = message.action;
+      sendSessionEvent(action);
       return false;
+    }
   }
 
   return true;

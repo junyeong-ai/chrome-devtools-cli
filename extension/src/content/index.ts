@@ -7,7 +7,6 @@ interface State {
   selectionMode: SelectionMode | null;
   selectionFilter: string | null;
   selectedElements: Element[];
-  recording: boolean;
   iframeActive: boolean;
 }
 
@@ -15,14 +14,24 @@ const state: State = {
   selectionMode: null,
   selectionFilter: null,
   selectedElements: [],
-  recording: false,
   iframeActive: false,
 };
 
 let hoverOverlay: HTMLElement | null = null;
 let tooltip: HTMLElement | null = null;
-let scrollTimeout: number | null = null;
-let inputDebounceTimer: number | null = null;
+
+const inputState = {
+  pending: new WeakMap<Element, { value: string; timer: number | null }>(),
+  lastSent: new WeakMap<Element, string>(),
+  activeElement: null as Element | null,
+};
+
+const scrollState = {
+  timer: null as number | null,
+  lastY: 0,
+  lastUrl: '',
+  pending: false,
+};
 
 function extractText(element: Element, maxLength: number): string | undefined {
   if (EXCLUDED_TAGS.includes(element.tagName)) return undefined;
@@ -62,11 +71,10 @@ chrome.runtime.onMessage.addListener((message, _, sendResponse) => {
       if (isTopFrame) sendResponse(getA11yTree());
       break;
     case 'start_recording':
-      startRecording();
+      sendResponse({ ok: true });
       break;
     case 'stop_recording':
-      stopRecording();
-      sendResponse({ stopped: true });
+      sendResponse({ ok: true });
       break;
   }
   return true;
@@ -181,11 +189,15 @@ function notifyParentSelected(element: Element, info: ElementInfo): void {
   } catch {}
 }
 
-document.addEventListener('click', handleClick, true);
+window.addEventListener('click', handleClick, true);
+window.addEventListener('pointerdown', handlePointerDown, true);
 document.addEventListener('mousemove', handleMouseMove, true);
 document.addEventListener('keydown', handleKeyDown, true);
-document.addEventListener('input', handleInput, true);
+document.addEventListener('input', handleInputChange, true);
+document.addEventListener('focusin', handleFocusIn, true);
+document.addEventListener('focusout', handleFocusOut, true);
 document.addEventListener('scroll', handleScroll, true);
+window.addEventListener('beforeunload', flushPendingEvents);
 
 if (!isTopFrame) {
   document.addEventListener('mouseleave', handleIframeMouseLeave);
@@ -218,15 +230,34 @@ function cancelSelection(): void {
   if (isTopFrame) hideToast();
 }
 
+// Track last pointer event to avoid duplicate click tracking
+let lastPointerTs = 0;
+
+function handlePointerDown(e: PointerEvent): void {
+  // Only track primary button (left click)
+  if (e.button !== 0 || e.pointerType === 'touch') return;
+
+  // Store timestamp to detect if click event fires
+  lastPointerTs = Date.now();
+
+  // Delay slightly to allow click event to fire first
+  setTimeout(() => {
+    // If more than 300ms passed without click event, track via pointerdown
+    if (Date.now() - lastPointerTs >= 300) {
+      trackClick(e as unknown as MouseEvent);
+    }
+  }, 350);
+}
+
 function handleClick(e: MouseEvent): void {
+  // Reset pointer timestamp to prevent duplicate tracking
+  lastPointerTs = 0;
+
   if (state.selectionMode) {
     handleSelectionClick(e);
     return;
   }
-
-  if (state.recording) {
-    trackClick(e);
-  }
+  trackClick(e);
 }
 
 function handleSelectionClick(e: MouseEvent): void {
@@ -304,90 +335,184 @@ function handleMouseMove(e: MouseEvent): void {
 }
 
 function handleKeyDown(e: KeyboardEvent): void {
-  if (!state.selectionMode) return;
-
-  if (e.key === 'Escape') {
-    cancelSelection();
-    if (isTopFrame) showToast('Selection cancelled', 2000);
-  } else if (e.key === 'Enter' && state.selectionMode === 'multiple' && state.selectedElements.length > 0) {
-    if (isTopFrame) {
-      for (const el of state.selectedElements) {
-        const info = getElementInfo(el);
-        const semanticElement = getSemanticElement(el);
-        const elementRect = getElementRect(el);
-        sendToCli({
-          select: {
-            aria: semanticElement.name ? [semanticElement.role, semanticElement.name] : [semanticElement.role],
-            css: info.selector,
-            xpath: info.xpath,
-            text: semanticElement.text,
-            rect: elementRect,
-            url: window.location.href,
-            ts: Date.now(),
-          },
-        });
-      }
+  if (state.selectionMode) {
+    if (e.key === 'Escape') {
+      cancelSelection();
+      if (isTopFrame) showToast('Selection cancelled', 2000);
+      return;
     }
-    cancelSelection();
+    if (e.key === 'Enter' && state.selectionMode === 'multiple' && state.selectedElements.length > 0) {
+      if (isTopFrame) {
+        for (const el of state.selectedElements) {
+          const info = getElementInfo(el);
+          const semanticElement = getSemanticElement(el);
+          const elementRect = getElementRect(el);
+          sendToCli({
+            select: {
+              aria: semanticElement.name ? [semanticElement.role, semanticElement.name] : [semanticElement.role],
+              css: info.selector,
+              xpath: info.xpath,
+              text: semanticElement.text,
+              rect: elementRect,
+              url: window.location.href,
+              ts: Date.now(),
+            },
+          });
+        }
+      }
+      cancelSelection();
+      return;
+    }
+    return;
+  }
+
+  if (!isTopFrame) return;
+
+  const significantKeys = ['Enter', 'Tab', 'Escape'];
+  if (!significantKeys.includes(e.key)) return;
+
+  const target = e.target as Element;
+  const isInputElement = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT';
+
+  if (e.key === 'Enter' && isInputElement) {
+    flushInputEvent(target);
+  }
+
+  const info = getElementInfo(target);
+  const targetInfo = buildTargetInfo(target, info);
+
+  sendToCli({
+    keypress: {
+      key: e.key,
+      aria: targetInfo.aria,
+      css: targetInfo.css,
+      xpath: targetInfo.xpath,
+      testid: targetInfo.testid,
+      url: window.location.href,
+      ts: Date.now(),
+    },
+  });
+}
+
+function isInputElement(el: Element): el is HTMLInputElement | HTMLTextAreaElement {
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
+}
+
+function handleFocusIn(e: FocusEvent): void {
+  const target = e.target as Element;
+  if (isInputElement(target)) {
+    inputState.activeElement = target;
   }
 }
 
-function handleInput(e: Event): void {
-  if (!state.recording || !isTopFrame) return;
-
-  const target = e.target as HTMLInputElement;
-  if (inputDebounceTimer) clearTimeout(inputDebounceTimer);
-
-  inputDebounceTimer = setTimeout(() => {
-    const info = getElementInfo(target);
-    const targetInfo = buildTargetInfo(target, info);
-
-    sendToCli({
-      input: {
-        aria: targetInfo.aria,
-        css: targetInfo.css,
-        xpath: targetInfo.xpath,
-        testid: targetInfo.testid,
-        rect: targetInfo.rect,
-        value: target.value,
-        url: window.location.href,
-        ts: Date.now(),
-      },
-    });
-  }, 1000) as unknown as number;
+function handleFocusOut(e: FocusEvent): void {
+  const target = e.target as Element;
+  if (isInputElement(target)) {
+    flushInputEvent(target);
+    inputState.activeElement = null;
+  }
 }
 
-let lastScrollY = 0;
-let lastScrollUrl = '';
+function handleInputChange(e: Event): void {
+  if (!isTopFrame) return;
+  const target = e.target as HTMLInputElement | HTMLTextAreaElement;
+  if (!isInputElement(target)) return;
+
+  const pending = inputState.pending.get(target);
+  if (pending?.timer) clearTimeout(pending.timer);
+
+  const timer = setTimeout(() => {
+    const p = inputState.pending.get(target);
+    if (p) p.timer = null;
+  }, 200) as unknown as number;
+
+  inputState.pending.set(target, { value: target.value, timer });
+}
+
+function flushInputEvent(element: Element): void {
+  if (!isInputElement(element)) return;
+
+  const pending = inputState.pending.get(element);
+  if (!pending) return;
+
+  if (pending.timer) {
+    clearTimeout(pending.timer);
+    pending.timer = null;
+  }
+
+  const lastSent = inputState.lastSent.get(element);
+  if (pending.value === lastSent) {
+    inputState.pending.delete(element);
+    return;
+  }
+
+  inputState.lastSent.set(element, pending.value);
+  inputState.pending.delete(element);
+
+  const info = getElementInfo(element);
+  const targetInfo = buildTargetInfo(element, info);
+
+  sendToCli({
+    input: {
+      aria: targetInfo.aria,
+      css: targetInfo.css,
+      xpath: targetInfo.xpath,
+      testid: targetInfo.testid,
+      rect: targetInfo.rect,
+      value: pending.value,
+      url: window.location.href,
+      ts: Date.now(),
+    },
+  });
+}
 
 function handleScroll(): void {
-  if (!state.recording || !isTopFrame) return;
+  if (!isTopFrame) return;
 
-  if (scrollTimeout) clearTimeout(scrollTimeout);
-  scrollTimeout = setTimeout(() => {
-    const currentUrl = window.location.href;
+  if (scrollState.timer) clearTimeout(scrollState.timer);
+  scrollState.pending = true;
 
-    // URL changed = page navigation, reset tracking
-    if (currentUrl !== lastScrollUrl) {
-      lastScrollUrl = currentUrl;
-      lastScrollY = window.scrollY;
-      // Skip scroll event on page transition (scroll y=0 noise)
-      if (window.scrollY === 0) return;
-    }
+  scrollState.timer = setTimeout(() => {
+    flushScrollEvent();
+  }, 300) as unknown as number;
+}
 
-    const deltaY = Math.abs(window.scrollY - lastScrollY);
-    if (deltaY < 50) return;
+function flushScrollEvent(): void {
+  if (!scrollState.pending) return;
+  scrollState.pending = false;
 
-    lastScrollY = window.scrollY;
-    sendToCli({
-      scroll: {
-        x: window.scrollX,
-        y: window.scrollY,
-        url: currentUrl,
-        ts: Date.now(),
-      },
-    });
-  }, 500) as unknown as number;
+  if (scrollState.timer) {
+    clearTimeout(scrollState.timer);
+    scrollState.timer = null;
+  }
+
+  const currentUrl = window.location.href;
+
+  if (currentUrl !== scrollState.lastUrl) {
+    scrollState.lastUrl = currentUrl;
+    scrollState.lastY = window.scrollY;
+    if (window.scrollY === 0) return;
+  }
+
+  const deltaY = Math.abs(window.scrollY - scrollState.lastY);
+  if (deltaY < 50) return;
+
+  scrollState.lastY = window.scrollY;
+  sendToCli({
+    scroll: {
+      x: window.scrollX,
+      y: window.scrollY,
+      url: currentUrl,
+      ts: Date.now(),
+    },
+  });
+}
+
+function flushPendingEvents(): void {
+  if (inputState.activeElement) {
+    flushInputEvent(inputState.activeElement);
+  }
+  flushScrollEvent();
 }
 
 function matchesFilter(element: Element): boolean {
@@ -436,15 +561,6 @@ async function captureAndNotify(element: Element, info: ElementInfo): Promise<vo
       ts: Date.now(),
     },
   });
-}
-
-function startRecording(): void {
-  state.recording = true;
-  lastScrollY = window.scrollY;
-}
-
-function stopRecording(): void {
-  state.recording = false;
 }
 
 interface TargetInfo {
