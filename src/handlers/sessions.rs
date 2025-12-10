@@ -208,19 +208,19 @@ pub fn handle_events(
     // Find recording time range if recording_id is specified
     let recording_range: Option<(u64, Option<u64>)> = recording_id.and_then(|rid| {
         let start_ts = all.iter().find_map(|e| {
-            if let ExtensionEvent::RecordingStart(m) = e {
-                if m.recording_id == rid {
-                    return Some(m.ts);
-                }
+            if let ExtensionEvent::RecordingStart(m) = e
+                && m.recording_id == rid
+            {
+                return Some(m.ts);
             }
             None
         })?;
 
         let end_ts = all.iter().find_map(|e| {
-            if let ExtensionEvent::RecordingStop(m) = e {
-                if m.recording_id == rid {
-                    return Some(m.ts);
-                }
+            if let ExtensionEvent::RecordingStop(m) = e
+                && m.recording_id == rid
+            {
+                return Some(m.ts);
             }
             None
         });
@@ -256,9 +256,8 @@ pub fn handle_events(
             };
 
             let recording_match = recording_range.is_none_or(|(start, end)| {
-                e.timestamp_ms().is_some_and(|ts| {
-                    ts >= start && end.is_none_or(|end_ts| ts <= end_ts)
-                })
+                e.timestamp_ms()
+                    .is_some_and(|ts| ts >= start && end.is_none_or(|end_ts| ts <= end_ts))
             });
 
             type_match && time_match && recording_match

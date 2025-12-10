@@ -1,13 +1,13 @@
 use crate::chrome::storage::SessionStorage;
 use crate::{ChromeError, Result};
+use chromiumoxide::Page;
 use chromiumoxide::cdp::browser_protocol::tracing::{
     EndParams, EventDataCollected, EventTracingComplete, StartParams, TraceConfig,
 };
-use chromiumoxide::Page;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
@@ -81,19 +81,14 @@ impl TraceCollector {
         }
     }
 
-    pub async fn start(
-        &self,
-        page: &Arc<Page>,
-        categories: Option<Vec<String>>,
-    ) -> Result<String> {
+    pub async fn start(&self, page: &Arc<Page>, categories: Option<Vec<String>>) -> Result<String> {
         if self.is_active.swap(true, Ordering::SeqCst) {
             return Err(ChromeError::General("Trace already active".into()));
         }
 
         let trace_id = uuid::Uuid::new_v4().to_string();
-        let categories = categories.unwrap_or_else(|| {
-            DEFAULT_CATEGORIES.iter().map(|s| s.to_string()).collect()
-        });
+        let categories = categories
+            .unwrap_or_else(|| DEFAULT_CATEGORIES.iter().map(|s| s.to_string()).collect());
 
         self.events.lock().await.clear();
 
@@ -101,7 +96,9 @@ impl TraceCollector {
         let mut data_stream = page
             .event_listener::<EventDataCollected>()
             .await
-            .map_err(|e| ChromeError::General(format!("Failed to subscribe to trace events: {e}")))?;
+            .map_err(|e| {
+                ChromeError::General(format!("Failed to subscribe to trace events: {e}"))
+            })?;
 
         tokio::spawn(async move {
             while let Some(event) = data_stream.next().await {
@@ -145,23 +142,30 @@ impl TraceCollector {
         let mut complete_stream = page
             .event_listener::<EventTracingComplete>()
             .await
-            .map_err(|e| ChromeError::General(format!("Failed to subscribe to trace complete: {e}")))?;
+            .map_err(|e| {
+                ChromeError::General(format!("Failed to subscribe to trace complete: {e}"))
+            })?;
 
         page.execute(EndParams::default())
             .await
             .map_err(|e| ChromeError::General(format!("Failed to stop trace: {e}")))?;
 
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            complete_stream.next(),
-        ).await;
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(10), complete_stream.next()).await;
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        let trace_id = self.trace_id.lock().await.take()
+        let trace_id = self
+            .trace_id
+            .lock()
+            .await
+            .take()
             .unwrap_or_else(|| "unknown".to_string());
         let start_time = self.start_time.load(Ordering::SeqCst);
-        let duration_ms = self.start_instant.lock().await
+        let duration_ms = self
+            .start_instant
+            .lock()
+            .await
             .take()
             .map(|i| i.elapsed().as_millis() as u64)
             .unwrap_or(0);
@@ -204,7 +208,9 @@ impl TraceCollector {
         let start_time = self.start_time.load(Ordering::SeqCst);
 
         let elapsed_ms = if is_active {
-            self.start_instant.lock().await
+            self.start_instant
+                .lock()
+                .await
                 .as_ref()
                 .map(|i| i.elapsed().as_millis() as u64)
         } else {
@@ -214,7 +220,11 @@ impl TraceCollector {
         TraceStatus {
             is_active,
             trace_id,
-            start_time: if start_time > 0 { Some(start_time) } else { None },
+            start_time: if start_time > 0 {
+                Some(start_time)
+            } else {
+                None
+            },
             elapsed_ms,
         }
     }

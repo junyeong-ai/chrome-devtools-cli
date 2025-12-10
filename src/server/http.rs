@@ -441,7 +441,12 @@ async fn start_trace(
         }
     };
 
-    match session.collectors().trace.start(&page, req.categories).await {
+    match session
+        .collectors()
+        .trace
+        .start(&page, req.categories)
+        .await
+    {
         Ok(trace_id) => {
             tracing::info!(trace_id = %trace_id, "Trace started via HTTP");
             (StatusCode::OK, Json(ApiResponse::with_trace_id(trace_id)))
@@ -484,7 +489,10 @@ async fn stop_trace(
                 events = data.event_count,
                 "Trace stopped via HTTP"
             );
-            (StatusCode::OK, Json(ApiResponse::with_trace_id(data.trace_id)))
+            (
+                StatusCode::OK,
+                Json(ApiResponse::with_trace_id(data.trace_id)),
+            )
         }
         Err(e) => (
             StatusCode::CONFLICT,

@@ -1,152 +1,169 @@
 # Chrome DevTools CLI - AI Agent Developer Guide
 
-Essential knowledge for implementing features and debugging this Rust CLI tool.
+Rust CLI for Chrome automation via CDP. Daemon architecture, session-based event capture, Playwright export.
 
 ---
 
-## Core Patterns
+## Architecture
 
-### BrowserSessionManager
+```
+src/
+├── main.rs                    # Entry point
+├── cli/
+│   ├── commands.rs            # Clap command definitions
+│   └── dispatch.rs            # Command routing, session resolution
+├── handlers/                  # Command implementations
+│   ├── navigate.rs, click.rs, screenshot.rs, ...
+│   ├── trace.rs               # trace <url> command + trace analysis
+│   ├── sessions.rs            # History queries (events, network, console)
+│   └── export.rs              # Playwright script generation
+├── server/
+│   ├── daemon.rs              # Unix socket RPC handlers
+│   ├── session_pool.rs        # Session lifecycle, browser management
+│   └── http.rs                # HTTP API for extension
+├── chrome/
+│   ├── collectors/            # CDP event capture
+│   │   ├── network.rs         # Request/response capture
+│   │   ├── console.rs         # Console messages
+│   │   ├── extension.rs       # User action events (click, input, scroll)
+│   │   └── trace.rs           # CDP Tracing domain (browser-level)
+│   └── storage.rs             # NDJSON session storage
+└── client/
+    └── connection.rs          # Daemon client
 
-**Implementation** (`chrome/session_manager.rs`):
-```rust
-// Browser lifecycle
-manager.get_or_create_browser().await?;
-manager.get_or_create_page().await?;
-
-// Tab management
-manager.new_page(url).await?;
-manager.select_page(index).await?;
-manager.close_page(index).await?;
+extension/src/
+├── content/index.ts           # User action capture (DOM events)
+├── popup/popup.ts             # Extension popup UI (Select, Record, Trace, Screenshot)
+└── service-worker.ts          # Event forwarding to HTTP API, trace/recording state
 ```
 
-**Why**: Central component managing browser lifecycle and session persistence.
-
-**Session file**: `~/.config/chrome-devtools-cli/session.toml` stores `session_id`, `debug_port`, `active_page_url`. Used for `--keep-alive` browser reconnection.
-
 ---
 
-### CollectorSet
+## Key Patterns
 
-**Mechanism** (`chrome/collectors/mod.rs`):
+### Command Dispatch Flow
 ```rust
-pub struct CollectorSet {
-    pub network: NetworkCollector,
-    pub console: ConsoleCollector,
-    pub pageerror: PageErrorCollector,
-    pub issues: IssuesCollector,
-}
-collectors.attach(&page).await?;  // CDP event subscription
+// cli/dispatch.rs
+dispatch() → handle_via_daemon() or handle_history_command()
+  → DaemonClient::request("method", params)
+  → server/daemon.rs handles RPC
+  → handlers/*.rs implementations
 ```
 
-**Why**: Unified collector management for CDP event capture.
+### Event Capture Flow
+```
+User action → content/index.ts → service-worker.ts → HTTP POST /api/events
+  → server/http.rs → ExtensionCollector → NDJSON file
+```
 
-**Storage**: NDJSON files in `~/.config/chrome-devtools-cli/sessions/{id}/`
+### Trace Capture Flow
+```
+CLI: trace <url> → daemon.rs → TraceCollector.start() → CDP Tracing.start
+  → navigate → Tracing.end → stream chunks → trace.ndjson
 
----
+Extension: Start Trace → HTTP POST /api/trace/start → TraceCollector.start()
+  → ... user interaction ... → HTTP POST /api/trace/stop → Tracing.end
+```
 
-### OutputFormatter
+Note: Tracing is browser-level (one trace per browser instance), not per-tab.
 
-**Pattern**:
+### Session Resolution
 ```rust
+// cli/dispatch.rs - For --user-profile flag
+resolve_session_id(session_id: Option<String>, user_profile: bool)
+  → explicit session_id OR daemon query for user-profile session
+```
+
+### OutputFormatter Trait
+```rust
+// All handler results implement this for --json support
 impl OutputFormatter for MyResult {
-    fn format_text(&self) -> String { /* colored output */ }
-    fn format_json(&self, pretty: bool) -> Result<String> { /* serde_json */ }
+    fn format_text(&self) -> String { ... }
+    fn format_json(&self, pretty: bool) -> Result<String> { ... }
 }
 ```
 
-**CRITICAL**: All handler results must implement this trait for `--json` support.
+---
+
+## Common Tasks
+
+### Add Command
+1. `cli/commands.rs`: Add enum variant with `#[command]` and `#[arg]`
+2. `handlers/new.rs`: Implement handler returning `impl OutputFormatter`
+3. `cli/dispatch.rs`: Add match arm in appropriate handler function
+4. `handlers/mod.rs`: Export module
+
+### Add Extension Event
+1. `extension/src/content/index.ts`: Capture event and `sendToCli({event_name: {...}})`
+2. `chrome/collectors/extension.rs`: Add variant to `ExtensionEvent` enum (serde renames)
+
+### Add Collector
+1. `chrome/collectors/new.rs`: Implement with `append()` to storage
+2. `chrome/collectors/mod.rs`: Add to `CollectorSet`, update `attach()`
 
 ---
 
-## Development Tasks
-
-### Add New Command
-
-1. **cli/commands.rs**: Add Command enum variant
-   ```rust
-   #[command(about = "My command")]
-   MyCommand { #[arg()] param: String },
-   ```
-
-2. **handlers/my_handler.rs**: Implement handler + result type
-
-3. **cli/dispatch.rs**: Wire command to handler
-
-4. **handlers/mod.rs**: Export module
-
----
-
-### Add New Collector
-
-1. **chrome/collectors/my_collector.rs**: Implement collector
-2. **chrome/collectors/mod.rs**: Add to `CollectorSet`
-3. Update `CollectorSet::attach()` for event subscription
-
----
-
-### Add Config Field
-
-**config.rs**: Add field to appropriate section with `#[serde(default)]`
-
----
-
-## Common Issues
-
-### Session Connection Lost
-
-**Symptom**: `ConnectionLost` error on browser operations
-
-**Cause**: Stale session file pointing to dead process
-
-**Fix**: `session_manager.rs:connect_to_existing()` detects and triggers fresh launch
-
----
-
-### Collector Not Capturing
-
-**Symptom**: Empty network/console data despite page activity
-
-**Cause**: CDP event subscription failed or page closed
-
-**Fix**: Ensure `collectors.attach(&page)` called after page creation
-
----
-
-### Page Not Found
-
-**Symptom**: Session restored but operations fail
-
-**Cause**: Session restored but pages array empty
-
-**Fix**: `restore_pages_with_url()` creates new page with saved URL
-
----
-
-## Key Constants
-
-**Locations**:
-- `session_manager.rs`: `SESSION_MAX_AGE_SECS = 3600`
-- `config.rs`: Default port (9222), timeout (30s)
-- `devices.rs`: 8 preset devices (`DEVICE_PRESETS`)
-- `trace/analyzer.rs`: Core Web Vitals thresholds
-
-**To modify**: Edit constant in source, or add to `Config` struct + `config.toml` for user configuration.
-
----
-
-## File Paths
+## Storage
 
 ```
 ~/.config/chrome-devtools-cli/
-├── chrome-for-testing/    # Auto-installed browser
-├── chrome-profile/        # Browser profile data
-├── extension/             # Chrome extension
-├── sessions/{id}/         # Per-session NDJSON data
-├── config.toml            # User configuration
-└── session.toml           # Active session info
+├── sessions/{id}/              # Per-session data
+│   ├── extension.ndjson        # User events (click, input, scroll, keypress)
+│   ├── network.ndjson          # HTTP requests/responses
+│   ├── console.ndjson          # Console messages
+│   ├── trace.ndjson            # CDP trace events (Tracing domain)
+│   └── recordings/{rid}/       # Frame JPEGs + metadata.json
+├── extension/                  # Built extension files
+├── chrome-for-testing/         # Browser binary
+└── config.toml                 # User config (user_data_dir for profile path)
 ```
 
 ---
 
-This guide contains only implementation-critical knowledge. For user documentation, see [README.md](README.md).
+## Extension Events
+
+| Event | Trigger | Key Fields |
+|-------|---------|------------|
+| `click` | pointerdown/click | aria, css, xpath, rect, url, ts |
+| `input` | focusout/beforeunload | aria, css, value, url, ts |
+| `keypress` | keydown (Enter/Tab/Escape) | key, aria, css, url, ts |
+| `scroll` | scroll (300ms debounce) | x, y, url, ts |
+| `navigate` | load/pushState/popState | url, nav_type, ts |
+| `recording_start/stop` | HTTP API | recording_id, ts |
+| `trace_start/stop` | HTTP API | trace_id, ts |
+
+---
+
+## HTTP API Endpoints (Extension)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/events` | POST | User action events from extension |
+| `/api/recording/start` | POST | Start screen recording |
+| `/api/recording/stop` | POST | Stop screen recording |
+| `/api/trace/start` | POST | Start CDP trace |
+| `/api/trace/stop` | POST | Stop CDP trace |
+| `/api/trace/status` | GET | Check trace status |
+
+---
+
+## Constants
+
+| Location | Constant | Value |
+|----------|----------|-------|
+| `config.rs` | default port | 9222 |
+| `config.rs` | navigation_timeout | 30s |
+| `devices.rs` | DEVICE_PRESETS | 8 devices |
+| `trace/analyzer.rs` | Core Web Vitals thresholds | LCP 2.5s, CLS 0.1, etc. |
+
+---
+
+## Debug
+
+```bash
+RUST_LOG=debug chrome-devtools-cli navigate "https://example.com"
+```
+
+**Extension not capturing**: Verify `~/.config/chrome-devtools-cli/extension/` has built files
+
+**Build extension**: `cd extension && npm run build`

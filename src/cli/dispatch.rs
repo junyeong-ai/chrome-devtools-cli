@@ -89,9 +89,12 @@ pub async fn dispatch(mut cli: Cli, config: Arc<Config>) -> Result<()> {
             let result = handlers::performance::handle_analyze(&trace)?;
             output::print_output(&result, cli.json, config.output.json_pretty)
         }
-        Command::Trace { url, output, user_profile, headless } => {
-            handle_trace_command(&url, &output, user_profile, headless, &cli, &config).await
-        }
+        Command::Trace {
+            url,
+            output,
+            user_profile,
+            headless,
+        } => handle_trace_command(&url, &output, user_profile, headless, &cli, &config).await,
         _ => handle_browser_command(command, cli, config).await,
     }
 }
@@ -1364,7 +1367,10 @@ async fn handle_trace_command(
     if !is_daemon_running(&socket_path) {
         eprintln!("Starting daemon...");
         start_daemon_background()?;
-        tokio::time::sleep(tokio::time::Duration::from_secs(crate::timeouts::secs::DAEMON_STARTUP)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(
+            crate::timeouts::secs::DAEMON_STARTUP,
+        ))
+        .await;
 
         if !is_daemon_running(&socket_path) {
             return Err(ChromeError::Connection("Failed to start daemon".into()));
