@@ -1,7 +1,7 @@
 use super::{
     Cli,
     commands::{
-        Command, ConfigCommand, CookiesCommand, ServerCommand, SessionCommand, SessionsCommand,
+        Command, ConfigCommand, CookiesCommand, HistoryCommand, ServerCommand, SessionCommand,
         StorageCommand,
     },
 };
@@ -83,11 +83,14 @@ pub async fn dispatch(mut cli: Cli, config: Arc<Config>) -> Result<()> {
         Command::Server { subcommand } => handle_server_command(subcommand, &config).await,
         Command::Session { subcommand } => handle_session_command(subcommand, &cli, &config).await,
         Command::Config { subcommand } => handle_config_command(subcommand, &cli).await,
-        Command::Sessions { subcommand } => handle_sessions_command(subcommand, &cli).await,
+        Command::History { subcommand } => handle_history_command(subcommand, &cli, &config).await,
         Command::Devices { .. } => handle_devices_command(&cli, &config).await,
         Command::Analyze { trace } => {
             let result = handlers::performance::handle_analyze(&trace)?;
             output::print_output(&result, cli.json, config.output.json_pretty)
+        }
+        Command::Trace { url, output, user_profile, headless } => {
+            handle_trace_command(&url, &output, user_profile, headless, &cli, &config).await
         }
         _ => handle_browser_command(command, cli, config).await,
     }
@@ -266,9 +269,34 @@ async fn handle_config_command(subcommand: ConfigCommand, cli: &Cli) -> Result<(
     }
 }
 
-async fn handle_sessions_command(subcommand: SessionsCommand, cli: &Cli) -> Result<()> {
+async fn resolve_session_id(session_id: Option<String>, user_profile: bool) -> Result<String> {
+    if let Some(sid) = session_id {
+        return Ok(sid);
+    }
+    if user_profile {
+        let socket_path = crate::server::default_socket_path();
+        if let Ok(mut client) = crate::client::DaemonClient::connect(&socket_path).await
+            && let Ok(Some(sid)) = client.get_user_profile_session_id().await
+        {
+            return Ok(sid);
+        }
+        return Err(ChromeError::General(
+            "No active user-profile session found. Start a browser with --user-profile first."
+                .to_string(),
+        ));
+    }
+    Err(ChromeError::General(
+        "Session ID required. Use --user-profile or provide a session ID.".to_string(),
+    ))
+}
+
+async fn handle_history_command(
+    subcommand: HistoryCommand,
+    cli: &Cli,
+    config: &Config,
+) -> Result<()> {
     match subcommand {
-        SessionsCommand::List => {
+        HistoryCommand::List => {
             let result = handlers::sessions::handle_list()?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
@@ -278,25 +306,36 @@ async fn handle_sessions_command(subcommand: SessionsCommand, cli: &Cli) -> Resu
                 }
             }
         }
-        SessionsCommand::Show { session_id } => {
-            let result = handlers::sessions::handle_show(&session_id)?;
+        HistoryCommand::Show {
+            session_id,
+            user_profile,
+        } => {
+            let sid = resolve_session_id(session_id, user_profile).await?;
+            let result = handlers::sessions::handle_show(&sid)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 println!("{:?}", result);
             }
         }
-        SessionsCommand::Network {
+        HistoryCommand::Network {
             session_id,
+            user_profile,
             domain,
             status,
+            from,
+            to,
+            last,
             limit,
             offset,
         } => {
+            let sid = resolve_session_id(session_id, user_profile).await?;
+            let time_filter = handlers::sessions::TimeFilter::new(from, to, last);
             let result = handlers::sessions::handle_network(
-                &session_id,
+                &sid,
                 domain.as_deref(),
                 status,
+                time_filter,
                 limit,
                 offset,
             )?;
@@ -308,14 +347,25 @@ async fn handle_sessions_command(subcommand: SessionsCommand, cli: &Cli) -> Resu
                 }
             }
         }
-        SessionsCommand::Console {
+        HistoryCommand::Console {
             session_id,
+            user_profile,
             level,
+            from,
+            to,
+            last,
             limit,
             offset,
         } => {
-            let result =
-                handlers::sessions::handle_console(&session_id, level.as_deref(), limit, offset)?;
+            let sid = resolve_session_id(session_id, user_profile).await?;
+            let time_filter = handlers::sessions::TimeFilter::new(from, to, last);
+            let result = handlers::sessions::handle_console(
+                &sid,
+                level.as_deref(),
+                time_filter,
+                limit,
+                offset,
+            )?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
@@ -324,8 +374,17 @@ async fn handle_sessions_command(subcommand: SessionsCommand, cli: &Cli) -> Resu
                 }
             }
         }
-        SessionsCommand::Errors { session_id, limit } => {
-            let result = handlers::sessions::handle_errors(&session_id, limit)?;
+        HistoryCommand::Errors {
+            session_id,
+            user_profile,
+            from,
+            to,
+            last,
+            limit,
+        } => {
+            let sid = resolve_session_id(session_id, user_profile).await?;
+            let time_filter = handlers::sessions::TimeFilter::new(from, to, last);
+            let result = handlers::sessions::handle_errors(&sid, time_filter, limit, None)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
@@ -334,8 +393,13 @@ async fn handle_sessions_command(subcommand: SessionsCommand, cli: &Cli) -> Resu
                 }
             }
         }
-        SessionsCommand::Issues { session_id, limit } => {
-            let result = handlers::sessions::handle_issues(&session_id, limit)?;
+        HistoryCommand::Issues {
+            session_id,
+            user_profile,
+            limit,
+        } => {
+            let sid = resolve_session_id(session_id, user_profile).await?;
+            let result = handlers::sessions::handle_issues(&sid, limit)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
@@ -344,35 +408,92 @@ async fn handle_sessions_command(subcommand: SessionsCommand, cli: &Cli) -> Resu
                 }
             }
         }
-        SessionsCommand::Delete { session_id } => {
+        HistoryCommand::Delete { session_id } => {
             handlers::sessions::handle_delete(&session_id)?;
             println!("Deleted session: {}", session_id);
         }
-        SessionsCommand::Clean { older_than } => {
-            let result = handlers::sessions::handle_clean(older_than)?;
+        HistoryCommand::Clean { older_than } => {
+            let duration = older_than
+                .or_else(|| Some(format!("{}h", config.storage.session_ttl_hours)))
+                .and_then(|s| handlers::sessions::parse_duration(&s));
+            let result = handlers::sessions::handle_clean(duration)?;
             println!("Cleaned {} sessions", result.removed);
         }
-        SessionsCommand::Extension {
+        HistoryCommand::Events {
             session_id,
+            user_profile,
+            r#type,
+            from,
+            to,
+            last,
+            recording,
             limit,
             offset,
         } => {
-            let result = handlers::sessions::handle_extension(&session_id, limit, offset)?;
+            let sid = resolve_session_id(session_id, user_profile).await?;
+            let time_filter = handlers::sessions::TimeFilter::new(from, to, last);
+            let result = handlers::sessions::handle_events(
+                &sid,
+                r#type.as_deref(),
+                time_filter,
+                recording.as_deref(),
+                limit,
+                offset,
+            )?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
-                println!("Extension events ({}/{})", result.items.len(), result.total);
+                println!("Events ({}/{})", result.items.len(), result.total);
                 for event in &result.items {
                     println!("  {:?}", event);
                 }
             }
         }
-        SessionsCommand::Export {
+        HistoryCommand::Recordings {
             session_id,
+            user_profile,
+        } => {
+            let sid = resolve_session_id(session_id, user_profile).await?;
+            let result = handlers::sessions::handle_recordings_list(&sid)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("{}", result.format_text());
+            }
+        }
+        HistoryCommand::Recording {
+            session_id,
+            user_profile,
+            recording_id,
+            frames,
+        } => {
+            let sid = resolve_session_id(session_id, user_profile).await?;
+            if frames {
+                let result = handlers::sessions::handle_recording_frames(&sid, &recording_id)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("{}", result.format_text());
+                }
+            } else {
+                let result = handlers::sessions::handle_recording_show(&sid, &recording_id)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("{}", result.format_text());
+                }
+            }
+        }
+        HistoryCommand::Export {
+            session_id,
+            user_profile,
+            recording,
             format,
             output,
         } => {
-            let result = handlers::export::handle_export(&session_id, &format, output)?;
+            let sid = resolve_session_id(session_id, user_profile).await?;
+            let result =
+                handlers::export::handle_export(&sid, recording.as_deref(), &format, output)?;
             if cli.json {
                 println!("{}", result.format_json(true)?);
             } else {
@@ -412,11 +533,11 @@ async fn handle_browser_command(command: Command, cli: Cli, config: Arc<Config>)
     }
 
     let mut client = DaemonClient::connect(&socket_path).await?;
+    let headless = cli.headless.unwrap_or(!cli.user_profile);
 
     let (session_id, is_new) = if let Some(ref sid) = cli.session {
         (sid.clone(), false)
     } else {
-        let headless = cli.headless.unwrap_or(!cli.user_profile);
         let sid = if cli.user_profile {
             client.get_or_create_user_profile_session(headless).await?
         } else {
@@ -429,11 +550,46 @@ async fn handle_browser_command(command: Command, cli: Cli, config: Arc<Config>)
         eprintln!("[session: {}]", session_id);
     }
 
-    handle_via_daemon(command, &cli, &config, &session_id).await
+    let result = handle_via_daemon(&command, &cli, &config, &session_id).await;
+
+    // user_profile mode: retry once if browser was closed
+    if cli.user_profile && is_browser_closed_error(&result) {
+        if !cli.json {
+            eprintln!("[reconnecting...]");
+        }
+
+        // Destroy dead session and create new one
+        client
+            .request("session.destroy", json!({ "session_id": session_id }))
+            .await
+            .ok();
+
+        let new_sid = client.get_or_create_user_profile_session(headless).await?;
+
+        if !cli.json {
+            eprintln!("[session: {}]", new_sid);
+        }
+
+        return handle_via_daemon(&command, &cli, &config, &new_sid).await;
+    }
+
+    result
+}
+
+fn is_browser_closed_error(result: &Result<()>) -> bool {
+    match result {
+        Err(e) => {
+            let msg = e.to_string().to_lowercase();
+            msg.contains("receiver is gone")
+                || msg.contains("connection")
+                || msg.contains("browser")
+        }
+        Ok(_) => false,
+    }
 }
 
 async fn handle_via_daemon(
-    command: Command,
+    command: &Command,
     cli: &Cli,
     config: &Config,
     session_id: &str,
@@ -476,7 +632,7 @@ async fn handle_via_daemon(
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
-                println!("Page reloaded{}", if hard { " (hard)" } else { "" });
+                println!("Page reloaded{}", if *hard { " (hard)" } else { "" });
             }
         }
 
@@ -514,12 +670,13 @@ async fn handle_via_daemon(
                 base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_data)
                     .map_err(|e| ChromeError::General(e.to_string()))?;
 
-            std::fs::write(&out, data)?;
+            let out_path = out.clone();
+            std::fs::write(out, &data)?;
 
             if cli.json {
-                println!(r#"{{"path":"{}"}}"#, out.display());
+                println!(r#"{{"path":"{}"}}"#, out_path.display());
             } else {
-                println!("Screenshot saved to: {}", out.display());
+                println!("Screenshot saved to: {}", out_path.display());
             }
         }
 
@@ -730,7 +887,7 @@ async fn handle_via_daemon(
                     "dialog",
                     json!({
                         "session_id": session_id,
-                        "accept": accept && !dismiss,
+                        "accept": *accept && !*dismiss,
                         "text": text
                     }),
                 )
@@ -880,10 +1037,10 @@ async fn handle_via_daemon(
                     json!({
                         "session_id": session_id,
                         "selector": selector,
-                        "attributes": all || attributes,
-                        "styles": all || styles,
-                        "box": all || r#box,
-                        "children": all || children
+                        "attributes": *all || *attributes,
+                        "styles": *all || *styles,
+                        "box": *all || *r#box,
+                        "children": *all || *children
                     }),
                 )
                 .await?;
@@ -1042,76 +1199,18 @@ async fn handle_via_daemon(
         }
 
         Command::Cookies { subcommand } => {
-            handle_cookies_via_daemon(subcommand, &mut client, session_id, cli).await?;
+            handle_cookies_via_daemon(subcommand.clone(), &mut client, session_id, cli).await?;
         }
 
         Command::Storage { subcommand } => {
-            handle_storage_via_daemon(subcommand, &mut client, session_id, cli).await?;
-        }
-
-        Command::Record {
-            output: out,
-            duration,
-            fps,
-            quality,
-            mp4,
-            ..
-        } => {
-            let result = client
-                .request(
-                    "record",
-                    json!({
-                        "session_id": session_id,
-                        "output": out.to_str().unwrap_or("recording"),
-                        "duration": duration.unwrap_or(10),
-                        "fps": fps,
-                        "quality": quality,
-                        "mp4": mp4
-                    }),
-                )
-                .await?;
-
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            } else {
-                let frames = result.get("frames").and_then(|f| f.as_u64()).unwrap_or(0);
-                let duration = result
-                    .get("duration_seconds")
-                    .and_then(|d| d.as_u64())
-                    .unwrap_or(0);
-                println!("Recorded {} frames over {} seconds", frames, duration);
-            }
-        }
-
-        Command::Trace {
-            url,
-            output: out,
-            categories,
-        } => {
-            let result = client
-                .request(
-                    "trace",
-                    json!({
-                        "session_id": session_id,
-                        "url": url,
-                        "output": out.to_str().unwrap_or("trace.json"),
-                        "categories": categories
-                    }),
-                )
-                .await?;
-
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            } else {
-                let path = result.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                println!("Trace saved to: {}", path);
-            }
+            handle_storage_via_daemon(subcommand.clone(), &mut client, session_id, cli).await?;
         }
 
         Command::Analyze { .. }
+        | Command::Trace { .. }
         | Command::Devices { .. }
         | Command::Config { .. }
-        | Command::Sessions { .. }
+        | Command::History { .. }
         | Command::Session { .. }
         | Command::Server { .. } => {
             unreachable!("These commands are handled separately in dispatch()")
@@ -1249,5 +1348,108 @@ async fn handle_storage_via_daemon(
             .unwrap_or("Done");
         println!("{}", action);
     }
+    Ok(())
+}
+
+async fn handle_trace_command(
+    url: &str,
+    output: &std::path::Path,
+    user_profile: bool,
+    headless: bool,
+    cli: &Cli,
+    config: &Arc<Config>,
+) -> Result<()> {
+    let socket_path = get_socket_path(config);
+
+    if !is_daemon_running(&socket_path) {
+        eprintln!("Starting daemon...");
+        start_daemon_background()?;
+        tokio::time::sleep(tokio::time::Duration::from_secs(crate::timeouts::secs::DAEMON_STARTUP)).await;
+
+        if !is_daemon_running(&socket_path) {
+            return Err(ChromeError::Connection("Failed to start daemon".into()));
+        }
+    }
+
+    let mut client = DaemonClient::connect(&socket_path).await?;
+
+    let params = if user_profile {
+        json!({"headless": headless, "profile_directory": "user"})
+    } else {
+        json!({"headless": headless})
+    };
+
+    let resp = client.request("session.create", params).await?;
+    let session_id = resp
+        .get("session_id")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| ChromeError::General("Failed to get session_id".into()))?
+        .to_string();
+
+    let resp = client
+        .request("trace.start", json!({"session_id": session_id}))
+        .await?;
+
+    if resp.get("error").is_some() {
+        return Err(ChromeError::General(
+            resp.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Failed to start trace")
+                .to_string(),
+        ));
+    }
+
+    client
+        .request(
+            "navigate",
+            json!({
+                "session_id": session_id,
+                "url": url,
+                "wait_for": "networkidle"
+            }),
+        )
+        .await?;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    let resp = client
+        .request("trace.stop", json!({"session_id": session_id}))
+        .await?;
+
+    let trace_data = resp.get("result").unwrap_or(&resp);
+    let events = trace_data.get("events").cloned().unwrap_or(json!([]));
+    let event_count = events.as_array().map(|a| a.len()).unwrap_or(0);
+
+    let output_data = json!({
+        "traceEvents": events,
+        "metadata": {
+            "url": url,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        }
+    });
+
+    std::fs::write(output, serde_json::to_string_pretty(&output_data)?)?;
+
+    if !user_profile {
+        client
+            .request("session.destroy", json!({"session_id": session_id}))
+            .await
+            .ok();
+    }
+
+    if cli.json {
+        print_json(&json!({
+            "file": output.display().to_string(),
+            "events": event_count,
+            "url": url,
+        }))?;
+    } else {
+        println!(
+            "Trace captured: {} ({} events)",
+            output.display(),
+            event_count
+        );
+    }
+
     Ok(())
 }

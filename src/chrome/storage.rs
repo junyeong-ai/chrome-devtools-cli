@@ -1,4 +1,5 @@
 use crate::Result;
+use crate::chrome::recording::{Recording, RecordingStorage, list_recordings};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -89,12 +90,6 @@ impl SessionStorage {
             .unwrap_or(0)
     }
 
-    pub fn frames_dir(&self) -> Result<PathBuf> {
-        let dir = self.base_dir.join("frames");
-        fs::create_dir_all(&dir)?;
-        Ok(dir)
-    }
-
     pub fn screenshots_dir(&self) -> Result<PathBuf> {
         let dir = self.base_dir.join("screenshots");
         fs::create_dir_all(&dir)?;
@@ -116,6 +111,31 @@ impl SessionStorage {
         fs::write(&session_file, session_data.to_string())?;
 
         Ok(ext_dir)
+    }
+
+    pub fn create_recording(
+        &self,
+        recording_id: &str,
+        fps: u32,
+        quality: u8,
+    ) -> Result<RecordingStorage> {
+        let storage = RecordingStorage::new(&self.base_dir, recording_id)?;
+        let recording = Recording::new(
+            recording_id.to_string(),
+            self.session_id.clone(),
+            fps,
+            quality,
+        );
+        storage.save_metadata(&recording)?;
+        Ok(storage)
+    }
+
+    pub fn get_recording(&self, recording_id: &str) -> Result<RecordingStorage> {
+        RecordingStorage::from_existing(&self.base_dir, recording_id)
+    }
+
+    pub fn list_recordings(&self) -> Result<Vec<Recording>> {
+        list_recordings(&self.base_dir)
     }
 
     pub fn cleanup(&self) -> Result<()> {

@@ -26,6 +26,7 @@ pub struct SessionInfo {
     pub last_activity: Instant,
     pub page_count: usize,
     pub headless: bool,
+    pub uses_user_profile: bool,
 }
 
 pub struct Session {
@@ -212,6 +213,7 @@ impl Session {
             last_activity: *self.last_activity.read().await,
             page_count: self.pages.read().await.len(),
             headless: self.headless,
+            uses_user_profile: self.uses_user_profile,
         }
     }
 
@@ -359,26 +361,17 @@ pub struct SessionPool {
     allocated_ports: RwLock<Vec<u16>>,
     config: Arc<Config>,
     max_sessions: usize,
-    session_timeout: Duration,
 }
 
 impl SessionPool {
     pub fn new(config: Arc<Config>) -> Self {
         let max_sessions = config.server.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS);
 
-        let session_timeout = Duration::from_secs(
-            config
-                .server
-                .session_timeout_secs
-                .unwrap_or(secs::SESSION_MAX_AGE),
-        );
-
         Self {
             sessions: RwLock::new(HashMap::new()),
             allocated_ports: RwLock::new(Vec::new()),
             config,
             max_sessions,
-            session_timeout,
         }
     }
 
@@ -573,7 +566,7 @@ impl SessionPool {
     }
 
     pub fn cleanup_stale_storage(&self) -> Result<usize> {
-        SessionStorage::cleanup_stale(self.session_timeout.as_secs())
+        SessionStorage::cleanup_stale(self.config.storage.session_ttl_hours * 3600)
     }
 
     async fn allocate_port(&self) -> Result<u16> {
@@ -615,6 +608,7 @@ mod tests {
             last_activity: now,
             page_count: 0,
             headless: true,
+            uses_user_profile: false,
         };
         assert_eq!(info.id, "test");
         assert_eq!(info.cdp_port, 9222);

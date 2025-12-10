@@ -4,6 +4,7 @@ pub mod extension;
 pub mod issues;
 pub mod network;
 pub mod pageerror;
+pub mod trace;
 
 use crate::Result;
 use crate::config::{DialogConfig, FilterConfig};
@@ -12,10 +13,11 @@ use std::sync::Arc;
 
 pub use console::{ConsoleCollector, ConsoleLevel, ConsoleMessage};
 pub use dialog::{Dialog, DialogCollector, DialogResult, DialogType};
-pub use extension::{ExtensionCollector, ExtensionEvent};
+pub use extension::{ExtensionCollector, ExtensionEvent, RecordingMarker, TargetInfo};
 pub use issues::{DevToolsIssue, IssuesCollector};
 pub use network::{NetworkCollector, NetworkRequest};
 pub use pageerror::{PageError, PageErrorCollector};
+pub use trace::{TraceCollector, TraceData, TraceStatus};
 
 use super::storage::SessionStorage;
 
@@ -26,6 +28,7 @@ pub struct CollectorSet {
     pub issues: IssuesCollector,
     pub dialog: DialogCollector,
     pub extension: ExtensionCollector,
+    pub trace: TraceCollector,
 }
 
 impl CollectorSet {
@@ -44,7 +47,8 @@ impl CollectorSet {
                 dialog_config.behavior,
                 dialog_config.prompt_text,
             ),
-            extension: ExtensionCollector::new(storage),
+            extension: ExtensionCollector::new(storage.clone()),
+            trace: TraceCollector::new(storage),
         }
     }
 

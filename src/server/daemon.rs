@@ -269,7 +269,8 @@ async fn handle_request(
                         "session_id": s.id,
                         "cdp_port": s.cdp_port,
                         "page_count": s.page_count,
-                        "headless": s.headless
+                        "headless": s.headless,
+                        "uses_user_profile": s.uses_user_profile
                     })
                 })
                 .collect();
@@ -870,35 +871,43 @@ async fn handle_request(
             Response::success(id, json!({"count": count}))
         }
 
-        "record" => {
+        // === Trace ===
+        "trace.start" => {
             let session = get_session!();
-            let output = require_str!("output");
-            let duration = opt_u64!(params, "duration", 10);
-            let fps = opt_u64!(params, "fps", 5) as u32;
-            let quality = params
-                .get("quality")
-                .and_then(|v| v.as_u64())
-                .map(|q| q as u8)
-                .unwrap_or(70);
-            let mp4 = opt_bool!(params, "mp4", false);
-            handlers::recording::handle_record(
-                session.as_ref(),
-                std::path::Path::new(output),
-                duration,
-                fps,
-                quality,
-                mp4,
-            )
-            .await
-            .to_response(id)
+            let categories = params.get("categories").and_then(|c| {
+                c.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+            });
+            let page = match session.get_or_create_page().await {
+                Ok(p) => p,
+                Err(e) => return Response::error(id, error_codes::INTERNAL_ERROR, e.to_string()),
+            };
+            match session.collectors().trace.start(&page, categories).await {
+                Ok(trace_id) => Response::success(id, json!({"trace_id": trace_id})),
+                Err(e) => Response::error(id, error_codes::INTERNAL_ERROR, e.to_string()),
+            }
         }
 
-        "trace" => Response::error(
-            id,
-            error_codes::METHOD_NOT_FOUND,
-            "trace command requires a dedicated browser session. Use the CLI directly for now."
-                .to_string(),
-        ),
+        "trace.stop" => {
+            let session = get_session!();
+            let page = match session.get_or_create_page().await {
+                Ok(p) => p,
+                Err(e) => return Response::error(id, error_codes::INTERNAL_ERROR, e.to_string()),
+            };
+            match session.collectors().trace.stop(&page).await {
+                Ok(data) => Response::success(id, serde_json::to_value(&data).unwrap_or_default()),
+                Err(e) => Response::error(id, error_codes::INTERNAL_ERROR, e.to_string()),
+            }
+        }
+
+        "trace.status" => {
+            let session = get_session!();
+            let status = session.collectors().trace.status().await;
+            Response::success(id, serde_json::to_value(&status).unwrap_or_default())
+        }
 
         _ => Response::error(
             id,

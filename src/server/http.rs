@@ -1,4 +1,4 @@
-use crate::chrome::collectors::extension::{ExtensionEvent, RecordingData, ScreenshotData};
+use crate::chrome::collectors::{ExtensionEvent, RecordingMarker, TraceStatus};
 use crate::chrome::storage::SessionStorage;
 use axum::{
     Json, Router,
@@ -7,10 +7,10 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
+use uuid::Uuid;
 
 use super::session_pool::SessionPool;
 
@@ -21,31 +21,17 @@ struct AppState {
     session_pool: Arc<SessionPool>,
 }
 
-#[derive(Deserialize)]
-struct EventPayload {
-    session_id: String,
-    event: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-struct FramePayload {
-    session_id: String,
-    index: u32,
-    data: String,
-}
-
-#[derive(Deserialize)]
-struct ScreenshotPayload {
-    session_id: String,
-    filename: Option<String>,
-    data: String,
-}
-
 #[derive(Serialize)]
 struct ApiResponse {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recording_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_status: Option<TraceStatus>,
 }
 
 impl ApiResponse {
@@ -53,6 +39,9 @@ impl ApiResponse {
         Self {
             ok: true,
             error: None,
+            recording_id: None,
+            trace_id: None,
+            trace_status: None,
         }
     }
 
@@ -60,8 +49,97 @@ impl ApiResponse {
         Self {
             ok: false,
             error: Some(msg.into()),
+            recording_id: None,
+            trace_id: None,
+            trace_status: None,
         }
     }
+
+    fn with_recording_id(recording_id: String) -> Self {
+        Self {
+            ok: true,
+            error: None,
+            recording_id: Some(recording_id),
+            trace_id: None,
+            trace_status: None,
+        }
+    }
+
+    fn with_trace_id(trace_id: String) -> Self {
+        Self {
+            ok: true,
+            error: None,
+            recording_id: None,
+            trace_id: Some(trace_id),
+            trace_status: None,
+        }
+    }
+
+    fn with_trace_status(status: TraceStatus) -> Self {
+        Self {
+            ok: true,
+            error: None,
+            recording_id: None,
+            trace_id: None,
+            trace_status: Some(status),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct StartRecordingRequest {
+    session_id: String,
+    fps: u32,
+    quality: u8,
+}
+
+#[derive(Deserialize)]
+struct StopRecordingRequest {
+    session_id: String,
+    recording_id: String,
+    frame_count: u32,
+    duration_ms: u64,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Deserialize)]
+struct FrameRequest {
+    session_id: String,
+    recording_id: String,
+    index: u32,
+    #[allow(dead_code)]
+    offset_ms: u64,
+    data: String,
+}
+
+#[derive(Deserialize)]
+struct ScreenshotRequest {
+    session_id: String,
+    filename: Option<String>,
+    data: String,
+}
+
+#[derive(Deserialize)]
+struct SessionEventRequest {
+    session_id: String,
+    event: ExtensionEvent,
+}
+
+#[derive(Deserialize)]
+struct TraceStartRequest {
+    session_id: String,
+    categories: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct TraceStopRequest {
+    session_id: String,
+}
+
+#[derive(Deserialize)]
+struct TraceStatusRequest {
+    session_id: String,
 }
 
 pub struct HttpServer {
@@ -86,9 +164,15 @@ impl HttpServer {
 
         let app = Router::new()
             .route("/api/health", get(health))
-            .route("/api/events", post(handle_event))
-            .route("/api/frames", post(handle_frame))
-            .route("/api/screenshots", post(handle_screenshot))
+            .route("/api/events", post(save_session_event))
+            .route("/api/screenshots", post(save_screenshot))
+            .route("/api/recording/start", post(start_recording))
+            .route("/api/recording/stop", post(stop_recording))
+            .route("/api/recording/frame", post(save_frame))
+            .route("/api/trace/start", post(start_trace))
+            .route("/api/trace/stop", post(stop_trace))
+            .route("/api/trace/status", post(trace_status))
+            .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
             .layer(cors)
             .with_state(state);
 
@@ -105,11 +189,18 @@ async fn health() -> Json<ApiResponse> {
     Json(ApiResponse::success())
 }
 
-async fn handle_event(
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+async fn start_recording(
     State(state): State<AppState>,
-    Json(payload): Json<EventPayload>,
+    Json(req): Json<StartRecordingRequest>,
 ) -> (StatusCode, Json<ApiResponse>) {
-    let session = match state.session_pool.get(&payload.session_id).await {
+    let session = match state.session_pool.get(&req.session_id).await {
         Some(s) => s,
         None => {
             return (
@@ -119,56 +210,11 @@ async fn handle_event(
         }
     };
 
-    let storage = session.storage();
+    let recording_id = Uuid::new_v4().to_string();
 
-    if let Some(screenshot) = payload.event.get("screenshot") {
-        if let Some(data) = screenshot.get("data").and_then(|d| d.as_str()) {
-            let data = data.trim_start_matches("data:image/png;base64,");
-            if let Ok(bytes) = BASE64.decode(data) {
-                let ts = Utc::now().timestamp_millis();
-                let filename = format!("screenshot_{}.png", ts);
-                if let Ok(dir) = storage.screenshots_dir()
-                    && std::fs::write(dir.join(&filename), &bytes).is_ok()
-                {
-                    let target = screenshot.get("target").cloned();
-                    let stored = ExtensionEvent::Screenshot(ScreenshotData {
-                        target: target.and_then(|t| serde_json::from_value(t).ok()),
-                        data: None,
-                        file: Some(format!("screenshots/{}", filename)),
-                        ts: Some(ts as u64),
-                    });
-                    let _ = storage.append("extension", &stored);
-                }
-            }
-        }
-        return (StatusCode::OK, Json(ApiResponse::success()));
-    }
-
-    if let Some(recording) = payload.event.get("recording") {
-        if let Some("frame") = recording.get("type").and_then(|t| t.as_str()) {
-            if let (Some(i), Some(data)) = (
-                recording.get("i").and_then(|v| v.as_u64()),
-                recording.get("data").and_then(|v| v.as_str()),
-            ) {
-                let data = data.trim_start_matches("data:image/jpeg;base64,");
-                if let Ok(bytes) = BASE64.decode(data)
-                    && let Ok(dir) = storage.frames_dir()
-                {
-                    let _ = std::fs::write(dir.join(format!("frame_{:04}.jpg", i)), &bytes);
-                }
-            }
-            return (StatusCode::OK, Json(ApiResponse::success()));
-        }
-
-        if let Ok(rec_data) = serde_json::from_value::<RecordingData>(recording.clone()) {
-            let event = ExtensionEvent::Recording(rec_data);
-            let _ = storage.append("extension", &event);
-        }
-        return (StatusCode::OK, Json(ApiResponse::success()));
-    }
-
-    if let Ok(event) = serde_json::from_value::<ExtensionEvent>(payload.event)
-        && let Err(e) = storage.append("extension", &event)
+    if let Err(e) = session
+        .storage()
+        .create_recording(&recording_id, req.fps, req.quality)
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -176,14 +222,37 @@ async fn handle_event(
         );
     }
 
-    (StatusCode::OK, Json(ApiResponse::success()))
+    let marker = RecordingMarker {
+        recording_id: recording_id.clone(),
+        ts: now_ms(),
+    };
+    let _ = session
+        .storage()
+        .append("extension", &ExtensionEvent::RecordingStart(marker));
+
+    tracing::info!(recording_id = %recording_id, fps = req.fps, "Recording started");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::with_recording_id(recording_id)),
+    )
 }
 
-async fn handle_frame(
-    State(_state): State<AppState>,
-    Json(payload): Json<FramePayload>,
+async fn stop_recording(
+    State(state): State<AppState>,
+    Json(req): Json<StopRecordingRequest>,
 ) -> (StatusCode, Json<ApiResponse>) {
-    let storage = match SessionStorage::from_session_id(&payload.session_id) {
+    let session = match state.session_pool.get(&req.session_id).await {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("session not found")),
+            );
+        }
+    };
+
+    let storage = match session.storage().get_recording(&req.recording_id) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -193,7 +262,68 @@ async fn handle_frame(
         }
     };
 
-    let data = payload.data.trim_start_matches("data:image/jpeg;base64,");
+    let mut recording = match storage.load_metadata() {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(e.to_string())),
+            );
+        }
+    };
+
+    recording.complete(req.frame_count, req.duration_ms, req.width, req.height);
+
+    if let Err(e) = storage.save_metadata(&recording) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(e.to_string())),
+        );
+    }
+
+    let marker = RecordingMarker {
+        recording_id: req.recording_id.clone(),
+        ts: now_ms(),
+    };
+    let _ = session
+        .storage()
+        .append("extension", &ExtensionEvent::RecordingStop(marker));
+
+    tracing::info!(
+        recording_id = %req.recording_id,
+        frames = req.frame_count,
+        duration_ms = req.duration_ms,
+        "Recording completed"
+    );
+
+    (StatusCode::OK, Json(ApiResponse::success()))
+}
+
+async fn save_frame(
+    State(state): State<AppState>,
+    Json(req): Json<FrameRequest>,
+) -> (StatusCode, Json<ApiResponse>) {
+    let session = match state.session_pool.get(&req.session_id).await {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("session not found")),
+            );
+        }
+    };
+
+    let storage = match session.storage().get_recording(&req.recording_id) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error(e.to_string())),
+            );
+        }
+    };
+
+    let data = req.data.trim_start_matches("data:image/jpeg;base64,");
     let bytes = match BASE64.decode(data) {
         Ok(b) => b,
         Err(e) => {
@@ -204,18 +334,7 @@ async fn handle_frame(
         }
     };
 
-    let frames_dir = match storage.frames_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(e.to_string())),
-            );
-        }
-    };
-
-    let filename = format!("frame_{:04}.jpg", payload.index);
-    if let Err(e) = std::fs::write(frames_dir.join(&filename), &bytes) {
+    if let Err(e) = storage.save_frame(req.index, &bytes) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::error(e.to_string())),
@@ -225,11 +344,11 @@ async fn handle_frame(
     (StatusCode::OK, Json(ApiResponse::success()))
 }
 
-async fn handle_screenshot(
+async fn save_session_event(
     State(_state): State<AppState>,
-    Json(payload): Json<ScreenshotPayload>,
+    Json(req): Json<SessionEventRequest>,
 ) -> (StatusCode, Json<ApiResponse>) {
-    let storage = match SessionStorage::from_session_id(&payload.session_id) {
+    let storage = match SessionStorage::from_session_id(&req.session_id) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -239,7 +358,31 @@ async fn handle_screenshot(
         }
     };
 
-    let data = payload.data.trim_start_matches("data:image/png;base64,");
+    if let Err(e) = storage.append("extension", &req.event) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(e.to_string())),
+        );
+    }
+
+    (StatusCode::OK, Json(ApiResponse::success()))
+}
+
+async fn save_screenshot(
+    State(_state): State<AppState>,
+    Json(req): Json<ScreenshotRequest>,
+) -> (StatusCode, Json<ApiResponse>) {
+    let storage = match SessionStorage::from_session_id(&req.session_id) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error(e.to_string())),
+            );
+        }
+    };
+
+    let data = req.data.trim_start_matches("data:image/png;base64,");
     let bytes = match BASE64.decode(data) {
         Ok(b) => b,
         Err(e) => {
@@ -260,7 +403,7 @@ async fn handle_screenshot(
         }
     };
 
-    let filename = payload
+    let filename = req
         .filename
         .unwrap_or_else(|| format!("screenshot_{}.png", chrono::Utc::now().timestamp_millis()));
 
@@ -272,4 +415,98 @@ async fn handle_screenshot(
     }
 
     (StatusCode::OK, Json(ApiResponse::success()))
+}
+
+async fn start_trace(
+    State(state): State<AppState>,
+    Json(req): Json<TraceStartRequest>,
+) -> (StatusCode, Json<ApiResponse>) {
+    let session = match state.session_pool.get(&req.session_id).await {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("session not found")),
+            );
+        }
+    };
+
+    let page = match session.get_or_create_page().await {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(e.to_string())),
+            );
+        }
+    };
+
+    match session.collectors().trace.start(&page, req.categories).await {
+        Ok(trace_id) => {
+            tracing::info!(trace_id = %trace_id, "Trace started via HTTP");
+            (StatusCode::OK, Json(ApiResponse::with_trace_id(trace_id)))
+        }
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::error(e.to_string())),
+        ),
+    }
+}
+
+async fn stop_trace(
+    State(state): State<AppState>,
+    Json(req): Json<TraceStopRequest>,
+) -> (StatusCode, Json<ApiResponse>) {
+    let session = match state.session_pool.get(&req.session_id).await {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("session not found")),
+            );
+        }
+    };
+
+    let page = match session.get_or_create_page().await {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(e.to_string())),
+            );
+        }
+    };
+
+    match session.collectors().trace.stop(&page).await {
+        Ok(data) => {
+            tracing::info!(
+                trace_id = %data.trace_id,
+                events = data.event_count,
+                "Trace stopped via HTTP"
+            );
+            (StatusCode::OK, Json(ApiResponse::with_trace_id(data.trace_id)))
+        }
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::error(e.to_string())),
+        ),
+    }
+}
+
+async fn trace_status(
+    State(state): State<AppState>,
+    Json(req): Json<TraceStatusRequest>,
+) -> (StatusCode, Json<ApiResponse>) {
+    let session = match state.session_pool.get(&req.session_id).await {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("session not found")),
+            );
+        }
+    };
+
+    let status = session.collectors().trace.status().await;
+    (StatusCode::OK, Json(ApiResponse::with_trace_status(status)))
 }
