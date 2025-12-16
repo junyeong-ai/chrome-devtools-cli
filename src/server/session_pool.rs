@@ -18,6 +18,28 @@ const PORT_RANGE_START: u16 = 9222;
 const PORT_RANGE_END: u16 = 9322;
 const DEFAULT_MAX_SESSIONS: usize = 5;
 
+/// Check if a Chrome instance is already running on the given port
+async fn check_existing_chrome(port: u16) -> Option<u16> {
+    let url = format!("http://127.0.0.1:{}/json/version", port);
+    match reqwest::get(&url).await {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!("Found existing Chrome on port {}", port);
+            Some(port)
+        }
+        _ => None,
+    }
+}
+
+/// Find existing Chrome instance in the port range
+async fn find_existing_chrome() -> Option<u16> {
+    for port in PORT_RANGE_START..=PORT_RANGE_END {
+        if let Some(p) = check_existing_chrome(port).await {
+            return Some(p);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub id: String,
@@ -454,6 +476,7 @@ impl SessionPool {
     ) -> Result<Arc<Session>> {
         self.cleanup_dead_browsers().await;
 
+        // Check for existing session in our pool
         {
             let sessions = self.sessions.read().await;
             for session in sessions.values() {
@@ -465,11 +488,91 @@ impl SessionPool {
             }
         }
 
+        // Check for existing Chrome instance not in our pool (external or orphaned)
+        if let Some(port) = find_existing_chrome().await {
+            tracing::info!("Found existing Chrome on port {}, attempting to connect", port);
+            match self
+                .create_session_from_existing(port, extension_path)
+                .await
+            {
+                Ok(session) => {
+                    tracing::info!("Connected to existing Chrome session: {}", session.id);
+                    return Ok(session);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to connect to existing Chrome: {}", e);
+                    // Fall through to create new session
+                }
+            }
+        }
+
         self.ensure_capacity(false).await?;
 
         tracing::info!("Creating user-profile session");
         self.create_session_internal(headless, Some(String::new()), extension_path)
             .await
+    }
+
+    /// Create a session by connecting to an existing Chrome instance
+    async fn create_session_from_existing(
+        &self,
+        cdp_port: u16,
+        extension_path: Option<&PathBuf>,
+    ) -> Result<Arc<Session>> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let storage = Arc::new(SessionStorage::new(&id)?);
+
+        // Setup extension if available
+        let base_ext = extension_path
+            .filter(|p| p.exists() && p.join("manifest.json").exists())
+            .cloned()
+            .or_else(|| {
+                crate::config::default_config_dir()
+                    .ok()
+                    .map(|d| d.join("extension"))
+                    .filter(|p| p.exists() && p.join("manifest.json").exists())
+            });
+
+        if let Some(ref src) = base_ext {
+            storage.setup_extension(src).ok();
+        }
+
+        let debug_url = format!("http://127.0.0.1:{}", cdp_port);
+        let (browser, mut handler) = Browser::connect(&debug_url)
+            .await
+            .map_err(|e| ChromeError::Connection(e.to_string()))?;
+
+        tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+        let browser = Arc::new(browser);
+        let collectors = Arc::new(CollectorSet::new(
+            storage.clone(),
+            self.config.dialog.clone(),
+            self.config.filters.clone(),
+        ));
+        let (event_tx, _) = broadcast::channel(1024);
+        let now = Instant::now();
+
+        let session = Arc::new(Session {
+            id: id.clone(),
+            cdp_port,
+            browser,
+            pages: RwLock::new(Vec::new()),
+            selected_page: RwLock::new(0),
+            storage,
+            collectors,
+            event_tx,
+            created_at: now,
+            last_activity: RwLock::new(now),
+            headless: false,
+            uses_user_profile: true,
+        });
+
+        // Mark this port as allocated
+        self.allocated_ports.write().await.push(cdp_port);
+        self.sessions.write().await.insert(id, session.clone());
+
+        Ok(session)
     }
 
     pub async fn create_ephemeral(
