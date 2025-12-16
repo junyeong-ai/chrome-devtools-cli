@@ -86,6 +86,19 @@ impl ApiResponse {
     }
 }
 
+#[derive(Serialize)]
+struct SessionResponse {
+    ok: bool,
+    session_id: Option<String>,
+    sessions: Vec<SessionInfo>,
+}
+
+#[derive(Serialize)]
+struct SessionInfo {
+    id: String,
+    cdp_port: u16,
+}
+
 #[derive(Deserialize)]
 struct StartRecordingRequest {
     session_id: String,
@@ -164,6 +177,7 @@ impl HttpServer {
 
         let app = Router::new()
             .route("/api/health", get(health))
+            .route("/api/session", get(get_session))
             .route("/api/events", post(save_session_event))
             .route("/api/screenshots", post(save_screenshot))
             .route("/api/recording/start", post(start_recording))
@@ -187,6 +201,27 @@ impl HttpServer {
 
 async fn health() -> Json<ApiResponse> {
     Json(ApiResponse::success())
+}
+
+async fn get_session(State(state): State<AppState>) -> Json<SessionResponse> {
+    let sessions: Vec<SessionInfo> = state
+        .session_pool
+        .list()
+        .await
+        .into_iter()
+        .map(|s| SessionInfo {
+            id: s.id.clone(),
+            cdp_port: s.cdp_port,
+        })
+        .collect();
+
+    let session_id = sessions.first().map(|s| s.id.clone());
+
+    Json(SessionResponse {
+        ok: true,
+        session_id,
+        sessions,
+    })
 }
 
 fn now_ms() -> u64 {

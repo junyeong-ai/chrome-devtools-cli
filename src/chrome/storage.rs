@@ -105,11 +105,6 @@ impl SessionStorage {
     pub fn setup_extension(&self, source_dir: &PathBuf) -> Result<PathBuf> {
         let ext_dir = self.extension_dir()?;
         copy_dir_recursive(source_dir, &ext_dir)?;
-
-        let session_file = ext_dir.join("session.json");
-        let session_data = serde_json::json!({ "session_id": &self.session_id });
-        fs::write(&session_file, session_data.to_string())?;
-
         Ok(ext_dir)
     }
 

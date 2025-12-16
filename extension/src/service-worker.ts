@@ -25,7 +25,6 @@ interface PerformanceTraceState {
   startTime: number;
 }
 
-let sessionId: string | null = null;
 let recording: ScreenRecordingState | null = null;
 let recordingInterval: ReturnType<typeof setInterval> | null = null;
 let tracing: PerformanceTraceState | null = null;
@@ -102,23 +101,15 @@ interface ScreenshotOptions {
   elementInfo?: ElementInfo;
 }
 
-async function loadSessionId(): Promise<string | null> {
+async function getSessionId(): Promise<string | null> {
   try {
-    const url = chrome.runtime.getURL('session.json');
-    const response = await fetch(url);
+    const response = await fetch(`${API_BASE}/api/session`);
     if (response.ok) {
       const data = await response.json();
-      return data.session_id || null;
+      return data.ok && data.session_id ? data.session_id : null;
     }
   } catch {}
   return null;
-}
-
-async function getSessionId(): Promise<string | null> {
-  if (!sessionId) {
-    sessionId = await loadSessionId();
-  }
-  return sessionId;
 }
 
 async function getActiveTab(): Promise<chrome.tabs.Tab | null> {
