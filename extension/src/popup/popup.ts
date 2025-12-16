@@ -126,3 +126,5 @@ screenshotBtn.addEventListener('click', async () => {
     updateTraceButton(true);
   }
 })();
+
+export {};

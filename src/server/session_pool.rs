@@ -490,7 +490,10 @@ impl SessionPool {
 
         // Check for existing Chrome instance not in our pool (external or orphaned)
         if let Some(port) = find_existing_chrome().await {
-            tracing::info!("Found existing Chrome on port {}, attempting to connect", port);
+            tracing::info!(
+                "Found existing Chrome on port {}, attempting to connect",
+                port
+            );
             match self
                 .create_session_from_existing(port, extension_path)
                 .await

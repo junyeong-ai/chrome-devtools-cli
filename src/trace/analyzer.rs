@@ -67,8 +67,7 @@ fn calculate_lcp(events: &[TraceEvent], nav_start: f64) -> Option<f64> {
         .map(|_| {
             events
                 .iter()
-                .filter(|e| e.name == "largestContentfulPaint::Candidate")
-                .next_back()
+                .rfind(|e| e.name == "largestContentfulPaint::Candidate")
                 .map(|e| (e.timestamp - nav_start) / 1000.0)
                 .unwrap_or(0.0)
         })
