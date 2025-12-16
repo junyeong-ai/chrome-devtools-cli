@@ -78,6 +78,15 @@ chrome-devtools-cli navigate "<url>" --user-profile [--headless=false]
 chrome-devtools-cli reload --user-profile
 chrome-devtools-cli back --user-profile
 chrome-devtools-cli forward --user-profile
+chrome-devtools-cli stop --user-profile
+```
+
+### Page Management
+```bash
+chrome-devtools-cli pages --user-profile              # List all open pages
+chrome-devtools-cli select-page <index> --user-profile
+chrome-devtools-cli new-page --user-profile [--url "<url>"]
+chrome-devtools-cli close-page <index> --user-profile
 ```
 
 ### Interaction
@@ -89,6 +98,8 @@ chrome-devtools-cli press <Key> --user-profile    # Enter, Tab, Escape
 chrome-devtools-cli select "<selector>" --user-profile [--label "<text>"]
 chrome-devtools-cli hover "<selector>" --user-profile
 chrome-devtools-cli scroll "<selector>" --user-profile
+chrome-devtools-cli dialog --user-profile [--accept] [--text "<input>"]
+chrome-devtools-cli wait "<selector>" --user-profile [--timeout 5000]
 ```
 
 ### Capture
@@ -162,4 +173,13 @@ chrome-devtools-cli devices    # List available presets
 chrome-devtools-cli server start
 chrome-devtools-cli server status
 chrome-devtools-cli server stop
+```
+
+## Session Management
+
+```bash
+chrome-devtools-cli session-info --user-profile    # Get current session details
+chrome-devtools-cli session list                   # List all sessions (daemon mode)
+chrome-devtools-cli session create                 # Create new session
+chrome-devtools-cli session destroy <id>           # Destroy session
 ```

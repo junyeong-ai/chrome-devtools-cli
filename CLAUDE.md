@@ -138,12 +138,16 @@ impl OutputFormatter for MyResult {
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/api/health` | GET | Health check |
+| `/api/session` | GET | Get active session info |
 | `/api/events` | POST | User action events from extension |
+| `/api/screenshots` | POST | Save screenshot from extension |
 | `/api/recording/start` | POST | Start screen recording |
 | `/api/recording/stop` | POST | Stop screen recording |
+| `/api/recording/frame` | POST | Save recording frame |
 | `/api/trace/start` | POST | Start CDP trace |
 | `/api/trace/stop` | POST | Stop CDP trace |
-| `/api/trace/status` | GET | Check trace status |
+| `/api/trace/status` | POST | Check trace status |
 
 ---
 
