@@ -1,3 +1,5 @@
+const API_BASE = 'http://127.0.0.1:9223';
+
 const selectBtn = document.getElementById('select') as HTMLButtonElement;
 const recordBtn = document.getElementById('record') as HTMLButtonElement;
 const traceBtn = document.getElementById('trace') as HTMLButtonElement;
@@ -11,10 +13,10 @@ let isTracing = false;
 function updateRecordButton(recording: boolean): void {
   isRecording = recording;
   if (recording) {
-    recordBtn.innerHTML = '<span class="icon">⏹</span> Stop Recording';
+    recordBtn.innerHTML = '<span class="icon">⏹️</span> Stop Recording';
     recordBtn.classList.add('recording');
   } else {
-    recordBtn.innerHTML = '<span class="icon">⏺</span> Start Recording';
+    recordBtn.innerHTML = '<span class="icon">⏺️</span> Start Recording';
     recordBtn.classList.remove('recording');
   }
 }
@@ -22,12 +24,39 @@ function updateRecordButton(recording: boolean): void {
 function updateTraceButton(tracing: boolean): void {
   isTracing = tracing;
   if (tracing) {
-    traceBtn.innerHTML = '<span class="icon">⏹</span> Stop Trace';
+    traceBtn.innerHTML = '<span class="icon">⏹️</span> Stop Trace';
     traceBtn.classList.add('tracing');
   } else {
     traceBtn.innerHTML = '<span class="icon">📊</span> Start Trace';
     traceBtn.classList.remove('tracing');
   }
+}
+
+function updateConnectionStatus(connected: boolean, sessionId?: string): void {
+  if (connected) {
+    statusEl.classList.remove('disconnected');
+    statusEl.classList.add('connected');
+    statusText.textContent = sessionId ? 'Connected' : 'Connected';
+  } else {
+    statusEl.classList.remove('connected');
+    statusEl.classList.add('disconnected');
+    statusText.textContent = 'Standalone';
+  }
+}
+
+async function checkConnection(): Promise<{ connected: boolean; sessionId?: string }> {
+  try {
+    const response = await fetch(`${API_BASE}/api/session`);
+    if (response.ok) {
+      const data = await response.json();
+      if (data.ok && data.session_id) {
+        return { connected: true, sessionId: data.session_id };
+      }
+    }
+  } catch {
+    // Connection failed
+  }
+  return { connected: false };
 }
 
 selectBtn.addEventListener('click', async () => {
@@ -82,18 +111,18 @@ screenshotBtn.addEventListener('click', async () => {
   window.close();
 });
 
-chrome.runtime.sendMessage({ type: 'get_status' }).then(response => {
-  if (response?.recording) {
+// Initialize: check connection directly via HTTP API
+(async () => {
+  // Check daemon connection directly
+  const { connected, sessionId } = await checkConnection();
+  updateConnectionStatus(connected, sessionId);
+
+  // Get recording/tracing state from service worker
+  const swStatus = await chrome.runtime.sendMessage({ type: 'get_status' });
+  if (swStatus?.recording) {
     updateRecordButton(true);
   }
-
-  if (response?.tracing) {
+  if (swStatus?.tracing) {
     updateTraceButton(true);
   }
-
-  if (response?.daemonConnected) {
-    statusEl.classList.remove('disconnected');
-    statusEl.classList.add('connected');
-    statusText.textContent = 'Connected';
-  }
-});
+})();

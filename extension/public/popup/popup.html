@@ -83,11 +83,20 @@
     button.recording {
       background: linear-gradient(135deg, #ef4444, #dc2626);
       color: white;
-      animation: pulse 1.5s infinite;
+      animation: pulse-red 1.5s infinite;
     }
-    @keyframes pulse {
+    button.tracing {
+      background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+      color: white;
+      animation: pulse-blue 1.5s infinite;
+    }
+    @keyframes pulse-red {
       0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
       50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+    }
+    @keyframes pulse-blue {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
+      50% { box-shadow: 0 0 0 8px rgba(59, 130, 246, 0); }
     }
     .footer {
       margin-top: 12px;
@@ -115,6 +124,10 @@
     <button id="record">
       <span class="icon">⏺️</span>
       <span>Start Recording</span>
+    </button>
+    <button id="trace">
+      <span class="icon">📊</span>
+      <span>Start Trace</span>
     </button>
     <button id="screenshot">
       <span class="icon">📸</span>
