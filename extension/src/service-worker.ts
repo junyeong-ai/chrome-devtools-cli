@@ -1,14 +1,10 @@
 import * as RecordingStore from './lib/recording-store';
-import { getConnection, DaemonConnection } from './lib/daemon-connection';
 
 const API_BASE = 'http://127.0.0.1:9223';
 const MIN_CAPTURE_INTERVAL = 100;
 const RETRY_DELAY = 300;
 const MAX_RETRIES = 3;
 const TRACE_STATE_KEY = 'traceState';
-
-let wsConnection: DaemonConnection | null = null;
-let useWebSocket = true;
 
 interface ScreenRecordingState {
   id: string;
@@ -29,9 +25,112 @@ interface PerformanceTraceState {
   startTime: number;
 }
 
+interface ElementInfo {
+  selector: string;
+  tagName?: string;
+  className?: string;
+  id?: string;
+  text?: string;
+  dimensions?: string;
+}
+
+interface ScreenshotOptions {
+  tabId: number;
+  bounds?: { x: number; y: number; width: number; height: number };
+  elementInfo?: ElementInfo;
+}
+
 let recording: ScreenRecordingState | null = null;
 let recordingInterval: ReturnType<typeof setInterval> | null = null;
 let tracing: PerformanceTraceState | null = null;
+
+async function getSessionId(): Promise<string | null> {
+  try {
+    const response = await fetch(`${API_BASE}/api/session`);
+    if (response.ok) {
+      const data = await response.json();
+      return data.ok && data.session_id ? data.session_id : null;
+    }
+  } catch {}
+  return null;
+}
+
+async function api(endpoint: string, data: object): Promise<{ ok: boolean; error?: string; recording_id?: string }> {
+  const sid = await getSessionId();
+  try {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid, ...data }),
+    });
+    return await response.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function checkDaemonConnection(): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE}/api/health`);
+    const data = await response.json();
+    return data.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+async function getActiveTab(): Promise<chrome.tabs.Tab | null> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab?.id ? tab : null;
+}
+
+async function sendToContent(tabId: number, message: object, maxRetries = MAX_RETRIES): Promise<unknown> {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch {
+      if (i < maxRetries - 1) {
+        await new Promise(r => setTimeout(r, RETRY_DELAY));
+      }
+    }
+  }
+  return null;
+}
+
+async function sendSessionEvent(event: object): Promise<boolean> {
+  const result = await api('/api/events', { event });
+  return result.ok;
+}
+
+async function sendScreenshot(data: string, filename?: string): Promise<boolean> {
+  const result = await api('/api/screenshots', { data, filename });
+  return result.ok;
+}
+
+async function startRecordingOnServer(fps: number, quality: number): Promise<string | null> {
+  const result = await api('/api/recording/start', { fps, quality });
+  return result.ok ? result.recording_id ?? null : null;
+}
+
+async function stopRecordingOnServer(recordingId: string, frameCount: number, durationMs: number): Promise<boolean> {
+  const result = await api('/api/recording/stop', { recording_id: recordingId, frame_count: frameCount, duration_ms: durationMs });
+  return result.ok;
+}
+
+async function sendFrame(recordingId: string, index: number, offsetMs: number, data: string): Promise<boolean> {
+  const result = await api('/api/recording/frame', { recording_id: recordingId, index, offset_ms: offsetMs, data });
+  return result.ok;
+}
+
+async function startTraceOnServer(): Promise<string | null> {
+  const result = await api('/api/trace/start', {});
+  return result.ok ? (result as { trace_id?: string }).trace_id ?? null : null;
+}
+
+async function stopTraceOnServer(): Promise<{ trace_id?: string; event_count?: number } | null> {
+  const result = await api('/api/trace/stop', {});
+  return result.ok ? result as { trace_id?: string; event_count?: number } : null;
+}
 
 async function saveRecordingState(): Promise<void> {
   if (recording) {
@@ -108,122 +207,6 @@ function startFrameCapture(): void {
   }, captureInterval);
 }
 
-restoreRecordingState();
-
-interface ElementInfo {
-  selector: string;
-  tagName?: string;
-  className?: string;
-  id?: string;
-  text?: string;
-  dimensions?: string;
-}
-
-interface ScreenshotOptions {
-  tabId: number;
-  bounds?: { x: number; y: number; width: number; height: number };
-  elementInfo?: ElementInfo;
-}
-
-async function getSessionId(): Promise<string | null> {
-  try {
-    const response = await fetch(`${API_BASE}/api/session`);
-    if (response.ok) {
-      const data = await response.json();
-      return data.ok && data.session_id ? data.session_id : null;
-    }
-  } catch {}
-  return null;
-}
-
-async function initWebSocket(): Promise<void> {
-  const sessionId = await getSessionId();
-  if (!sessionId) {
-    setTimeout(initWebSocket, 5000);
-    return;
-  }
-
-  wsConnection = getConnection();
-  wsConnection.on('connected', () => {
-    console.log('[Chrome DevTools CLI] WebSocket connected');
-  });
-  wsConnection.on('reconnecting', (data) => {
-    console.log('[Chrome DevTools CLI] WebSocket reconnecting...', data);
-  });
-  wsConnection.connect(sessionId);
-}
-
-async function getActiveTab(): Promise<chrome.tabs.Tab | null> {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tab?.id ? tab : null;
-}
-
-async function sendToContent(tabId: number, message: object, maxRetries = MAX_RETRIES): Promise<unknown> {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await chrome.tabs.sendMessage(tabId, message);
-    } catch {
-      if (i < maxRetries - 1) {
-        await new Promise(r => setTimeout(r, RETRY_DELAY));
-      }
-    }
-  }
-  return null;
-}
-
-async function api(endpoint: string, data: object): Promise<{ ok: boolean; error?: string; recording_id?: string }> {
-  const sid = await getSessionId();
-  try {
-    const response = await fetch(`${API_BASE}${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sid, ...data }),
-    });
-    return await response.json();
-  } catch {
-    return { ok: false };
-  }
-}
-
-async function startRecordingOnServer(fps: number, quality: number): Promise<string | null> {
-  const result = await api('/api/recording/start', { fps, quality });
-  return result.ok ? result.recording_id ?? null : null;
-}
-
-async function stopRecordingOnServer(recordingId: string, frameCount: number, durationMs: number): Promise<boolean> {
-  const result = await api('/api/recording/stop', { recording_id: recordingId, frame_count: frameCount, duration_ms: durationMs });
-  return result.ok;
-}
-
-async function sendFrame(recordingId: string, index: number, offsetMs: number, data: string): Promise<boolean> {
-  const result = await api('/api/recording/frame', { recording_id: recordingId, index, offset_ms: offsetMs, data });
-  return result.ok;
-}
-
-async function sendSessionEvent(event: object): Promise<boolean> {
-  if (useWebSocket && wsConnection?.getState() === 'connected') {
-    wsConnection.sendEvent(event);
-    return true;
-  }
-  const result = await api('/api/events', { event });
-  return result.ok;
-}
-
-async function sendScreenshot(data: string, filename?: string): Promise<boolean> {
-  const result = await api('/api/screenshots', { data, filename });
-  return result.ok;
-}
-
-async function startTraceOnServer(): Promise<string | null> {
-  const result = await api('/api/trace/start', {});
-  return result.ok ? (result as { trace_id?: string }).trace_id ?? null : null;
-}
-
-async function stopTraceOnServer(): Promise<{ trace_id?: string; event_count?: number } | null> {
-  const result = await api('/api/trace/stop', {});
-  return result.ok ? result as { trace_id?: string; event_count?: number } : null;
-}
-
 async function saveTraceState(): Promise<void> {
   if (tracing) {
     await chrome.storage.session.set({ [TRACE_STATE_KEY]: tracing });
@@ -241,19 +224,76 @@ async function restoreTraceState(): Promise<void> {
   }
 }
 
-restoreTraceState();
-
-async function checkDaemonConnection(): Promise<boolean> {
+async function getDpr(tabId: number): Promise<number> {
   try {
-    const response = await fetch(`${API_BASE}/api/health`);
-    const data = await response.json();
-    return data.ok === true;
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => window.devicePixelRatio || 1,
+    });
+    return result?.result || 2;
   } catch {
-    return false;
+    return 2;
   }
 }
 
+async function resizeToLogicalPixels(dataUrl: string, quality: number, dpr: number): Promise<string> {
+  if (dpr <= 1) return dataUrl;
+
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  const bitmap = await createImageBitmap(blob);
+
+  const targetWidth = Math.round(bitmap.width / dpr);
+  const targetHeight = Math.round(bitmap.height / dpr);
+
+  const canvas = new OffscreenCanvas(targetWidth, targetHeight);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return dataUrl;
+
+  ctx.drawImage(bitmap, 0, 0, targetWidth, targetHeight);
+  const resultBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: quality / 100 });
+
+  return new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.readAsDataURL(resultBlob);
+  });
+}
+
+async function cropImage(
+  dataUrl: string,
+  bounds: { x: number; y: number; width: number; height: number }
+): Promise<string> {
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  const bitmap = await createImageBitmap(blob, bounds.x, bounds.y, bounds.width, bounds.height);
+
+  const canvas = new OffscreenCanvas(bounds.width, bounds.height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return dataUrl;
+
+  ctx.drawImage(bitmap, 0, 0);
+  const resultBlob = await canvas.convertToBlob({ type: 'image/png' });
+
+  return new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.readAsDataURL(resultBlob);
+  });
+}
+
 async function executeCommand(cmd: { type: string; [key: string]: unknown }): Promise<unknown> {
+  switch (cmd.type) {
+    case 'start_trace': {
+      const tab = await getActiveTab();
+      return await startTrace(tab?.id ?? 0);
+    }
+    case 'stop_trace':
+      return await stopTrace();
+    case 'stop_recording':
+      return await stopRecording();
+  }
+
   const tab = await getActiveTab();
   if (!tab?.id) return { error: 'No active tab' };
 
@@ -284,15 +324,6 @@ async function executeCommand(cmd: { type: string; [key: string]: unknown }): Pr
         (cmd.quality as number) || 70
       );
 
-    case 'stop_recording':
-      return await stopRecording();
-
-    case 'start_trace':
-      return await startTrace(tab.id);
-
-    case 'stop_trace':
-      return await stopTrace();
-
     case 'highlight':
       await sendToContent(tab.id, { type: 'highlight', selector: cmd.selector, color: cmd.color });
       return { success: true };
@@ -317,8 +348,8 @@ async function captureScreenshot(options: ScreenshotOptions): Promise<object> {
     const finalDataUrl = bounds ? await cropImage(dataUrl, bounds) : dataUrl;
     const filename = `screenshot_${Date.now()}.png`;
 
-    sendScreenshot(finalDataUrl, filename);
-    sendSessionEvent({
+    await sendScreenshot(finalDataUrl, filename);
+    await sendSessionEvent({
       screenshot: {
         filename,
         url: tab.url,
@@ -332,64 +363,6 @@ async function captureScreenshot(options: ScreenshotOptions): Promise<object> {
     return { success: true, dataUrl: finalDataUrl };
   } catch {
     return { error: 'Capture failed' };
-  }
-}
-
-async function cropImage(
-  dataUrl: string,
-  bounds: { x: number; y: number; width: number; height: number }
-): Promise<string> {
-  const response = await fetch(dataUrl);
-  const blob = await response.blob();
-  const bitmap = await createImageBitmap(blob, bounds.x, bounds.y, bounds.width, bounds.height);
-
-  const canvas = new OffscreenCanvas(bounds.width, bounds.height);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return dataUrl;
-
-  ctx.drawImage(bitmap, 0, 0);
-  const resultBlob = await canvas.convertToBlob({ type: 'image/png' });
-
-  return new Promise(resolve => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result as string);
-    reader.readAsDataURL(resultBlob);
-  });
-}
-
-async function resizeToLogicalPixels(dataUrl: string, quality: number, dpr: number): Promise<string> {
-  if (dpr <= 1) return dataUrl;
-
-  const response = await fetch(dataUrl);
-  const blob = await response.blob();
-  const bitmap = await createImageBitmap(blob);
-
-  const targetWidth = Math.round(bitmap.width / dpr);
-  const targetHeight = Math.round(bitmap.height / dpr);
-
-  const canvas = new OffscreenCanvas(targetWidth, targetHeight);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return dataUrl;
-
-  ctx.drawImage(bitmap, 0, 0, targetWidth, targetHeight);
-  const resultBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: quality / 100 });
-
-  return new Promise(resolve => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result as string);
-    reader.readAsDataURL(resultBlob);
-  });
-}
-
-async function getDpr(tabId: number): Promise<number> {
-  try {
-    const [result] = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => window.devicePixelRatio || 1,
-    });
-    return result?.result || 2;
-  } catch {
-    return 2;
   }
 }
 
@@ -435,7 +408,6 @@ async function startRecording(
     isActive: true,
   });
 
-  await showRecordingIndicator(tabId);
   startFrameCapture();
 
   return { success: true, recording_id: recordingId };
@@ -453,8 +425,6 @@ async function stopRecording(): Promise<object> {
     clearInterval(recordingInterval);
     recordingInterval = null;
   }
-
-  await hideRecordingIndicator(tabId);
 
   const durationMs = Date.now() - startTime;
   await stopRecordingOnServer(id, frameCount, durationMs);
@@ -495,7 +465,6 @@ async function startTrace(tabId: number): Promise<object> {
   };
 
   await saveTraceState();
-  await showTraceIndicator(tabId);
 
   return { success: true, trace_id: traceId };
 }
@@ -505,10 +474,8 @@ async function stopTrace(): Promise<object> {
     return { error: 'Not tracing' };
   }
 
-  const { tabId, startTime } = tracing;
+  const { startTime } = tracing;
   tracing.isActive = false;
-
-  await hideTraceIndicator(tabId);
 
   const serverResult = await stopTraceOnServer();
   const durationMs = Date.now() - startTime;
@@ -523,108 +490,6 @@ async function stopTrace(): Promise<object> {
   await saveTraceState();
 
   return result;
-}
-
-async function showTraceIndicator(tabId: number): Promise<void> {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        document.getElementById('__cdtcli_trace__')?.remove();
-        document.getElementById('__cdtcli_trace_style__')?.remove();
-
-        const indicator = document.createElement('div');
-        indicator.id = '__cdtcli_trace__';
-        indicator.innerHTML = `
-          <span style="display:inline-block;width:8px;height:8px;background:#3b82f6;border-radius:50%;margin-right:8px;animation:__cdtcli_trace_pulse__ 1s infinite"></span>
-          <span>Tracing</span>
-          <span style="margin-left:12px;padding:2px 8px;background:rgba(255,255,255,0.15);border-radius:4px;font-size:12px">Click to stop</span>
-        `;
-        indicator.style.cssText =
-          'position:fixed;top:16px;right:16px;padding:8px 16px;background:#1e40af;color:#fff;font:14px/1.4 system-ui,sans-serif;border-radius:8px;z-index:2147483647;box-shadow:0 4px 16px rgba(0,0,0,0.3);cursor:pointer;display:flex;align-items:center;user-select:none';
-
-        indicator.addEventListener('click', () => {
-          chrome.runtime.sendMessage({ type: 'execute_local', command: { type: 'stop_trace' } });
-        });
-
-        indicator.addEventListener('mouseenter', () => {
-          indicator.style.background = '#1e3a8a';
-        });
-        indicator.addEventListener('mouseleave', () => {
-          indicator.style.background = '#1e40af';
-        });
-
-        const style = document.createElement('style');
-        style.id = '__cdtcli_trace_style__';
-        style.textContent = '@keyframes __cdtcli_trace_pulse__{0%,100%{opacity:1}50%{opacity:0.5}}';
-        document.head.appendChild(style);
-        document.body.appendChild(indicator);
-      },
-    });
-  } catch {}
-}
-
-async function hideTraceIndicator(tabId: number): Promise<void> {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        document.getElementById('__cdtcli_trace__')?.remove();
-        document.getElementById('__cdtcli_trace_style__')?.remove();
-      },
-    });
-  } catch {}
-}
-
-async function showRecordingIndicator(tabId: number): Promise<void> {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        document.getElementById('__cdtcli_recording__')?.remove();
-        document.getElementById('__cdtcli_recording_style__')?.remove();
-
-        const indicator = document.createElement('div');
-        indicator.id = '__cdtcli_recording__';
-        indicator.innerHTML = `
-          <span style="display:inline-block;width:8px;height:8px;background:#ff0000;border-radius:50%;margin-right:8px;animation:__cdtcli_pulse__ 1s infinite"></span>
-          <span>Recording</span>
-          <span style="margin-left:12px;padding:2px 8px;background:rgba(255,255,255,0.15);border-radius:4px;font-size:12px">Click to stop</span>
-        `;
-        indicator.style.cssText =
-          'position:fixed;top:16px;right:16px;padding:8px 16px;background:#1a1a1a;color:#fff;font:14px/1.4 system-ui,sans-serif;border-radius:8px;z-index:2147483647;box-shadow:0 4px 16px rgba(0,0,0,0.3);cursor:pointer;display:flex;align-items:center;user-select:none';
-
-        indicator.addEventListener('click', () => {
-          chrome.runtime.sendMessage({ type: 'execute_local', command: { type: 'stop_recording' } });
-        });
-
-        indicator.addEventListener('mouseenter', () => {
-          indicator.style.background = '#2a2a2a';
-        });
-        indicator.addEventListener('mouseleave', () => {
-          indicator.style.background = '#1a1a1a';
-        });
-
-        const style = document.createElement('style');
-        style.id = '__cdtcli_recording_style__';
-        style.textContent = '@keyframes __cdtcli_pulse__{0%,100%{opacity:1}50%{opacity:0.5}}';
-        document.head.appendChild(style);
-        document.body.appendChild(indicator);
-      },
-    });
-  } catch {}
-}
-
-async function hideRecordingIndicator(tabId: number): Promise<void> {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        document.getElementById('__cdtcli_recording__')?.remove();
-        document.getElementById('__cdtcli_recording_style__')?.remove();
-      },
-    });
-  } catch {}
 }
 
 function showScreenshotDialog(tabId: number, dataUrl: string, elementInfo?: ElementInfo): void {
@@ -888,7 +753,6 @@ chrome.webNavigation.onCompleted.addListener(async details => {
         ts: Date.now(),
       },
     });
-    await showRecordingIndicator(details.tabId);
   }
 });
 
@@ -942,11 +806,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
 
     default:
-      // Unknown message type - do not indicate async response
       return false;
   }
 });
 
-initWebSocket();
+restoreRecordingState();
+restoreTraceState();
 
 export {};

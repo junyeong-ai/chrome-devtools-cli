@@ -430,7 +430,8 @@ impl SessionPool {
 
         if let Some(session) = session {
             self.release_port(session.cdp_port).await;
-            session.storage().cleanup().ok();
+            // Don't cleanup storage on destroy - preserve data for history/export
+            // Use `history clean` or `history delete` to remove session data
         }
 
         Ok(())

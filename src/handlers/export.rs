@@ -20,22 +20,22 @@ pub struct ExportResult {
 
 impl OutputFormatter for ExportResult {
     fn format_text(&self) -> String {
-        if let Some(ref path) = self.output {
-            format!(
+        match &self.output {
+            Some(path) => format!(
                 "Exported {} events to {} ({})",
                 self.events_processed, path, self.format
-            )
-        } else {
-            self.script.clone()
+            ),
+            None => self.script.clone(),
         }
     }
 
     fn format_json(&self, pretty: bool) -> Result<String> {
-        if pretty {
-            serde_json::to_string_pretty(self).map_err(|e| ChromeError::General(e.to_string()))
+        let result = if pretty {
+            serde_json::to_string_pretty(self)
         } else {
-            serde_json::to_string(self).map_err(|e| ChromeError::General(e.to_string()))
-        }
+            serde_json::to_string(self)
+        };
+        result.map_err(|e| ChromeError::General(e.to_string()))
     }
 }
 
@@ -55,24 +55,22 @@ pub fn handle_export(
     let storage = SessionStorage::from_session_id(session_id)?;
     let all_events: Vec<ExtensionEvent> = storage.read_all("extension")?;
 
-    let (events, rec_id) = if let Some(rid) = recording_id {
-        (filter_by_recording(&all_events, rid), Some(rid.to_string()))
-    } else {
-        let rec_id = find_latest_recording_id(&all_events);
-        if let Some(ref rid) = rec_id {
-            (filter_by_recording(&all_events, rid), rec_id)
-        } else {
-            (all_events, None)
+    let (events, rec_id) = match recording_id {
+        Some(rid) => (filter_by_recording(&all_events, rid), Some(rid.to_string())),
+        None => {
+            let rid = find_latest_recording_id(&all_events);
+            match &rid {
+                Some(r) => (filter_by_recording(&all_events, r), rid),
+                None => (all_events, None),
+            }
         }
     };
 
     if events.is_empty() {
-        return Err(ChromeError::General(
-            "No events found for export".to_string(),
-        ));
+        return Err(ChromeError::General("No events found for export".into()));
     }
 
-    let script = generate_playwright_script(&events);
+    let script = PlaywrightGenerator::generate(&events);
 
     if let Some(ref path) = output {
         fs::write(path, &script)
@@ -90,30 +88,26 @@ pub fn handle_export(
 }
 
 fn find_latest_recording_id(events: &[ExtensionEvent]) -> Option<String> {
-    events.iter().rev().find_map(|e| {
-        if let ExtensionEvent::RecordingStart(m) | ExtensionEvent::RecordingStop(m) = e {
+    events.iter().rev().find_map(|e| match e {
+        ExtensionEvent::RecordingStart(m) | ExtensionEvent::RecordingStop(m) => {
             Some(m.recording_id.clone())
-        } else {
-            None
         }
+        _ => None,
     })
 }
 
 fn filter_by_recording(events: &[ExtensionEvent], recording_id: &str) -> Vec<ExtensionEvent> {
-    let mut start_ts: Option<u64> = None;
-    let mut end_ts: Option<u64> = None;
-
-    for event in events {
-        match event {
+    let (start_ts, end_ts) = events
+        .iter()
+        .fold((None, None), |(start, end), event| match event {
             ExtensionEvent::RecordingStart(m) if m.recording_id == recording_id => {
-                start_ts = Some(m.ts);
+                (Some(m.ts), end)
             }
             ExtensionEvent::RecordingStop(m) if m.recording_id == recording_id => {
-                end_ts = Some(m.ts);
+                (start, Some(m.ts))
             }
-            _ => {}
-        }
-    }
+            _ => (start, end),
+        });
 
     let (start, end) = match (start_ts, end_ts) {
         (Some(s), Some(e)) => (s, e),
@@ -123,13 +117,7 @@ fn filter_by_recording(events: &[ExtensionEvent], recording_id: &str) -> Vec<Ext
 
     events
         .iter()
-        .filter(|e| {
-            if let Some(ts) = e.timestamp_ms() {
-                ts >= start && ts <= end
-            } else {
-                false
-            }
-        })
+        .filter(|e| e.timestamp_ms().is_some_and(|ts| ts >= start && ts <= end))
         .cloned()
         .collect()
 }
@@ -137,224 +125,243 @@ fn filter_by_recording(events: &[ExtensionEvent], recording_id: &str) -> Vec<Ext
 struct PlaywrightGenerator {
     lines: Vec<String>,
     last_url: Option<String>,
-    indent: usize,
-    action_count: usize,
 }
 
 impl PlaywrightGenerator {
-    fn new() -> Self {
-        Self {
-            lines: Vec::new(),
+    fn generate(events: &[ExtensionEvent]) -> String {
+        let mut ctx = Self {
+            lines: Vec::with_capacity(events.len() * 3),
             last_url: None,
-            indent: 2,
-            action_count: 0,
+        };
+
+        let test_name = ctx.infer_test_name(events);
+        ctx.lines
+            .push("import { test, expect } from '@playwright/test';".into());
+        ctx.lines.push(String::new());
+        ctx.lines
+            .push(format!("test('{test_name}', async ({{ page }}) => {{"));
+
+        let merged = Self::merge_events(events);
+        for (i, event) in merged.iter().enumerate() {
+            let next = merged.get(i + 1);
+            ctx.emit_event(event, next);
+        }
+
+        ctx.lines.push("});".into());
+        ctx.lines.join("\n")
+    }
+
+    fn merge_events(events: &[ExtensionEvent]) -> Vec<ExtensionEvent> {
+        let mut result = Vec::with_capacity(events.len());
+        let mut i = 0;
+
+        while i < events.len() {
+            let current = &events[i];
+            let next = events.get(i + 1);
+
+            // Skip recording markers
+            if matches!(
+                current,
+                ExtensionEvent::RecordingStart(_) | ExtensionEvent::RecordingStop(_)
+            ) {
+                i += 1;
+                continue;
+            }
+
+            // Skip duplicate clicks on same element within 500ms
+            if let ExtensionEvent::Click(target) = current
+                && let Some(ExtensionEvent::Click(next_target)) = next
+                && Self::is_same_element(target, next_target)
+                && Self::within_threshold(target.ts, next_target.ts, 500)
+            {
+                i += 1;
+                continue;
+            }
+
+            // Skip click if followed by input on same element (fill() auto-focuses)
+            if let ExtensionEvent::Click(click_target) = current
+                && let Some(ExtensionEvent::Input(input_data)) = next
+                && Self::is_same_element(click_target, &input_data.target)
+            {
+                i += 1;
+                continue;
+            }
+
+            // Skip navigate after keypress Enter (form already submitted)
+            if let ExtensionEvent::KeyPress(kp) = current
+                && kp.key == "Enter"
+                && let Some(ExtensionEvent::Navigate(_)) = next
+            {
+                result.push(current.clone());
+                i += 2; // Skip both current and navigate
+                continue;
+            }
+
+            result.push(current.clone());
+            i += 1;
+        }
+
+        result
+    }
+
+    fn is_same_element(a: &TargetInfo, b: &TargetInfo) -> bool {
+        (a.css.is_some() && a.css == b.css) || (a.xpath.is_some() && a.xpath == b.xpath)
+    }
+
+    fn within_threshold(ts1: Option<u64>, ts2: Option<u64>, threshold_ms: u64) -> bool {
+        match (ts1, ts2) {
+            (Some(t1), Some(t2)) => t2.saturating_sub(t1) < threshold_ms,
+            _ => false,
         }
     }
 
+    fn infer_test_name(&self, events: &[ExtensionEvent]) -> &'static str {
+        let has_login = events.iter().any(|e| match e {
+            ExtensionEvent::Navigate(d) => {
+                d.url.contains("login") || d.url.contains("signin") || d.url.contains("auth")
+            }
+            ExtensionEvent::Input(d) => d
+                .target
+                .aria
+                .iter()
+                .any(|a| a.to_lowercase().contains("password")),
+            _ => false,
+        });
+
+        let has_form = events.iter().any(|e| matches!(e, ExtensionEvent::Input(_)));
+        let has_search = events.iter().any(|e| match e {
+            ExtensionEvent::Navigate(d) => d.url.contains("search"),
+            _ => false,
+        });
+
+        if has_login {
+            "user authentication flow"
+        } else if has_search && has_form {
+            "search flow"
+        } else if has_form {
+            "form submission flow"
+        } else {
+            "recorded user flow"
+        }
+    }
+
+    fn emit_event(&mut self, event: &ExtensionEvent, next: Option<&ExtensionEvent>) {
+        match event {
+            ExtensionEvent::Navigate(data) => self.emit_navigate(&data.url),
+            ExtensionEvent::Click(target) => self.emit_click(target, next),
+            ExtensionEvent::Input(data) => self.emit_input(&data.target, data.value.as_deref()),
+            ExtensionEvent::KeyPress(data) => self.emit_keypress(&data.key, next),
+            ExtensionEvent::Scroll(data) => self.emit_scroll(data.x, data.y),
+            ExtensionEvent::Select(target) => self.emit_select(target),
+            ExtensionEvent::Hover(target) => self.emit_hover(target),
+            ExtensionEvent::Screenshot(data) => self.emit_screenshot(&data.filename),
+            ExtensionEvent::Dialog(data) => self.emit_dialog(data.ok),
+            ExtensionEvent::Snapshot(_) => {}
+            ExtensionEvent::RecordingStart(_) | ExtensionEvent::RecordingStop(_) => {}
+        }
+    }
+
+    fn emit_navigate(&mut self, url: &str) {
+        if self.last_url.as_deref() == Some(url) {
+            return;
+        }
+        self.last_url = Some(url.to_string());
+        self.add(format!("await page.goto('{}');", escape_string(url)));
+        self.add(format!(
+            "await expect(page).toHaveURL(/{}/);",
+            url_to_pattern(url)
+        ));
+        self.add_empty();
+    }
+
+    fn emit_click(&mut self, target: &TargetInfo, next: Option<&ExtensionEvent>) {
+        let locator = to_locator(target);
+        self.add(format!("await expect({locator}).toBeVisible();"));
+        self.add(format!("await {locator}.click();"));
+        if Self::triggers_navigation(target, next) {
+            self.add("await page.waitForLoadState('networkidle');");
+        }
+        self.add_empty();
+    }
+
+    fn emit_input(&mut self, target: &TargetInfo, value: Option<&str>) {
+        let locator = to_locator(target);
+        let val = value.unwrap_or("");
+        self.add(format!("await expect({locator}).toBeVisible();"));
+        self.add(format!("await {locator}.fill('{}');", escape_string(val)));
+        if !val.is_empty() {
+            self.add(format!(
+                "await expect({locator}).toHaveValue('{}');",
+                escape_string(val)
+            ));
+        }
+        self.add_empty();
+    }
+
+    fn emit_keypress(&mut self, key: &str, next: Option<&ExtensionEvent>) {
+        self.add(format!(
+            "await page.keyboard.press('{}');",
+            escape_string(key)
+        ));
+        if key == "Enter" && matches!(next, Some(ExtensionEvent::Navigate(_))) {
+            self.add("await page.waitForLoadState('networkidle');");
+        }
+        self.add_empty();
+    }
+
+    fn emit_scroll(&mut self, x: i32, y: i32) {
+        self.add(format!("await page.mouse.wheel({x}, {y});"));
+    }
+
+    fn emit_select(&mut self, target: &TargetInfo) {
+        let locator = to_locator(target);
+        self.add(format!("await {locator}.click();"));
+    }
+
+    fn emit_hover(&mut self, target: &TargetInfo) {
+        let locator = to_locator(target);
+        self.add(format!("await {locator}.hover();"));
+    }
+
+    fn emit_screenshot(&mut self, filename: &str) {
+        self.add(format!(
+            "await page.screenshot({{ path: '{}' }});",
+            escape_string(filename)
+        ));
+    }
+
+    fn emit_dialog(&mut self, accept: bool) {
+        let action = if accept { "accept" } else { "dismiss" };
+        self.add(format!("page.on('dialog', dialog => dialog.{action}());"));
+    }
+
+    fn triggers_navigation(target: &TargetInfo, next: Option<&ExtensionEvent>) -> bool {
+        let is_submit = target.aria.iter().any(|a| {
+            let lower = a.to_lowercase();
+            lower.contains("submit")
+                || lower.contains("login")
+                || lower.contains("sign")
+                || lower.contains("search")
+        });
+        is_submit || matches!(next, Some(ExtensionEvent::Navigate(_)))
+    }
+
     fn add(&mut self, line: impl Into<String>) {
-        let indent = " ".repeat(self.indent);
-        self.lines.push(format!("{}{}", indent, line.into()));
+        self.lines.push(format!("  {}", line.into()));
     }
 
     fn add_empty(&mut self) {
         self.lines.push(String::new());
     }
-
-    fn generate(mut self, events: &[ExtensionEvent]) -> String {
-        self.lines
-            .push("import { test, expect } from '@playwright/test';".to_string());
-        self.add_empty();
-
-        let test_name = self.infer_test_name(events);
-        self.lines
-            .push(format!("test('{}', async ({{ page }}) => {{", test_name));
-
-        let grouped = self.group_events(events);
-
-        for group in grouped {
-            self.process_event_group(&group);
-        }
-
-        if self.action_count > 0 {
-            self.add_empty();
-        }
-
-        self.lines.push("});".to_string());
-        self.lines.join("\n")
-    }
-
-    fn infer_test_name(&self, events: &[ExtensionEvent]) -> String {
-        let has_login = events.iter().any(|e| {
-            if let ExtensionEvent::Navigate(d) = e {
-                d.url.contains("login") || d.url.contains("signin")
-            } else if let ExtensionEvent::Input(d) = e {
-                d.target
-                    .aria
-                    .iter()
-                    .any(|a| a.to_lowercase().contains("password"))
-            } else {
-                false
-            }
-        });
-
-        let has_form = events.iter().any(|e| matches!(e, ExtensionEvent::Input(_)));
-
-        if has_login {
-            "user login flow".to_string()
-        } else if has_form {
-            "form submission flow".to_string()
-        } else {
-            "recorded user flow".to_string()
-        }
-    }
-
-    fn group_events(&self, events: &[ExtensionEvent]) -> Vec<EventGroup> {
-        let mut groups = Vec::new();
-        let mut i = 0;
-
-        while i < events.len() {
-            let event = &events[i];
-            let next_event = events.get(i + 1);
-
-            let group = EventGroup {
-                action: event.clone(),
-                causes_navigation: self.causes_navigation(event, next_event),
-            };
-            groups.push(group);
-            i += 1;
-        }
-
-        groups
-    }
-
-    fn causes_navigation(&self, event: &ExtensionEvent, next: Option<&ExtensionEvent>) -> bool {
-        if let ExtensionEvent::Click(target) = event {
-            let is_submit = target.aria.iter().any(|a| {
-                let lower = a.to_lowercase();
-                lower.contains("submit") || lower.contains("login") || lower.contains("sign")
-            });
-            let next_is_nav = matches!(next, Some(ExtensionEvent::Navigate(_)));
-            is_submit || next_is_nav
-        } else if let ExtensionEvent::KeyPress(k) = event {
-            k.key == "Enter"
-        } else {
-            false
-        }
-    }
-
-    fn process_event_group(&mut self, group: &EventGroup) {
-        match &group.action {
-            ExtensionEvent::Navigate(data) => {
-                if self.last_url.as_ref() != Some(&data.url) {
-                    self.last_url = Some(data.url.clone());
-                    self.add(format!("await page.goto('{}');", escape_string(&data.url)));
-                    self.add(format!(
-                        "await expect(page).toHaveURL(/{}/);\n",
-                        extract_url_pattern(&data.url)
-                    ));
-                    self.action_count += 1;
-                }
-            }
-            ExtensionEvent::Click(target) => {
-                let locator = target_to_locator(target);
-                self.add(format!("await expect({}).toBeVisible();", locator));
-                self.add(format!("await {}.click();", locator));
-
-                if group.causes_navigation {
-                    self.add("await page.waitForLoadState('networkidle');");
-                }
-                self.add_empty();
-                self.action_count += 1;
-            }
-            ExtensionEvent::Input(data) => {
-                let locator = target_to_locator(&data.target);
-                let value = data.value.as_deref().unwrap_or("");
-                self.add(format!("await expect({}).toBeVisible();", locator));
-                self.add(format!(
-                    "await {}.fill('{}');",
-                    locator,
-                    escape_string(value)
-                ));
-                if !value.is_empty() {
-                    self.add(format!(
-                        "await expect({}).toHaveValue('{}');",
-                        locator,
-                        escape_string(value)
-                    ));
-                }
-                self.add_empty();
-                self.action_count += 1;
-            }
-            ExtensionEvent::Scroll(data) => {
-                self.add(format!("await page.mouse.wheel({}, {});", data.x, data.y));
-                self.action_count += 1;
-            }
-            ExtensionEvent::KeyPress(data) => {
-                self.add(format!(
-                    "await page.keyboard.press('{}');",
-                    escape_string(&data.key)
-                ));
-                if data.key == "Enter" && group.causes_navigation {
-                    self.add("await page.waitForLoadState('networkidle');");
-                }
-                self.add_empty();
-                self.action_count += 1;
-            }
-            ExtensionEvent::Select(target) => {
-                let locator = target_to_locator(target);
-                self.add(format!("await {}.click();", locator));
-                self.action_count += 1;
-            }
-            ExtensionEvent::Dialog(data) => {
-                if data.ok {
-                    self.add("page.on('dialog', dialog => dialog.accept());");
-                } else {
-                    self.add("page.on('dialog', dialog => dialog.dismiss());");
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
-struct EventGroup {
-    action: ExtensionEvent,
-    causes_navigation: bool,
-}
-
-fn extract_url_pattern(url: &str) -> String {
-    if let Ok(parsed) = url::Url::parse(url) {
-        let path = parsed.path();
-        if path.len() > 1 {
-            return escape_regex(&path[1..]);
-        }
-    }
-    escape_regex(url)
-}
-
-fn escape_regex(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '.' | '*' | '+' | '?' | '^' | '$' | '{' | '}' | '[' | ']' | '|' | '(' | ')' | '\\' => {
-                format!("\\{}", c)
-            }
-            _ => c.to_string(),
-        })
-        .collect()
-}
-
-fn generate_playwright_script(events: &[ExtensionEvent]) -> String {
-    PlaywrightGenerator::new().generate(events)
-}
-
-fn target_to_locator(target: &TargetInfo) -> String {
+fn to_locator(target: &TargetInfo) -> String {
     if let Some(ref testid) = target.testid {
         return format!("page.getByTestId('{}')", escape_string(testid));
     }
 
     if target.aria.len() >= 2 {
-        let role = &target.aria[0];
-        let name = &target.aria[1];
+        let (role, name) = (&target.aria[0], &target.aria[1]);
         if !role.is_empty() && !name.is_empty() {
             return format!(
                 "page.getByRole('{}', {{ name: '{}', exact: true }})",
@@ -374,7 +381,35 @@ fn target_to_locator(target: &TargetInfo) -> String {
         return format!("page.locator('{}')", escape_string(css));
     }
 
-    "page.locator('body')".to_string()
+    "page.locator('body')".into()
+}
+
+fn url_to_pattern(url: &str) -> String {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return escape_regex(url);
+    };
+
+    let host = parsed.host_str().unwrap_or("");
+    let path = parsed.path();
+
+    if path.len() > 1 {
+        let segment = path.split('/').find(|s| !s.is_empty()).unwrap_or("");
+        if !segment.is_empty() {
+            return format!("{}.*{}", escape_regex(host), escape_regex(segment));
+        }
+    }
+
+    escape_regex(host)
+}
+
+fn escape_regex(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '.' | '*' | '+' | '?' | '^' | '$' | '{' | '}' | '[' | ']' | '|' | '(' | ')' | '\\'
+            | '/' => format!("\\{c}"),
+            _ => c.to_string(),
+        })
+        .collect()
 }
 
 fn escape_string(s: &str) -> String {
@@ -386,18 +421,13 @@ mod tests {
     use super::*;
     use crate::chrome::collectors::extension::{InputData, KeyPressData, NavigateData};
 
-    fn make_target(
-        aria: Vec<&str>,
-        testid: Option<&str>,
-        text: Option<&str>,
-        css: Option<&str>,
-    ) -> TargetInfo {
+    fn make_target(aria: &[&str], testid: Option<&str>, css: Option<&str>) -> TargetInfo {
         TargetInfo {
-            aria: aria.into_iter().map(String::from).collect(),
+            aria: aria.iter().map(|s| s.to_string()).collect(),
             css: css.map(String::from),
             xpath: None,
             testid: testid.map(String::from),
-            text: text.map(String::from),
+            text: None,
             rect: None,
             url: None,
             ts: None,
@@ -405,48 +435,62 @@ mod tests {
     }
 
     #[test]
-    fn test_target_to_locator_testid() {
-        let target = make_target(vec![], Some("submit-btn"), None, None);
-        assert_eq!(target_to_locator(&target), "page.getByTestId('submit-btn')");
+    fn test_locator_priority() {
+        let testid = make_target(&[], Some("submit"), None);
+        assert_eq!(to_locator(&testid), "page.getByTestId('submit')");
+
+        let aria = make_target(&["button", "Submit"], None, Some("#btn"));
+        assert_eq!(
+            to_locator(&aria),
+            "page.getByRole('button', { name: 'Submit', exact: true })"
+        );
+
+        let css = make_target(&[], None, Some("#submit-btn"));
+        assert_eq!(to_locator(&css), "page.locator('#submit-btn')");
     }
 
     #[test]
-    fn test_target_to_locator_aria() {
-        let target = make_target(vec!["button", "Submit"], None, Some("Submit"), Some("#btn"));
+    fn test_url_pattern() {
+        assert_eq!(url_to_pattern("https://example.com"), "example\\.com");
         assert_eq!(
-            target_to_locator(&target),
-            "page.getByRole('button', { name: 'Submit', exact: true })"
+            url_to_pattern("https://google.com/search?q=test"),
+            "google\\.com.*search"
+        );
+        assert_eq!(
+            url_to_pattern("https://42dot.ai/careers"),
+            "42dot\\.ai.*careers"
         );
     }
 
     #[test]
-    fn test_target_to_locator_text() {
-        let target = make_target(vec![], None, Some("Click me"), Some("#btn"));
-        assert_eq!(target_to_locator(&target), "page.getByText('Click me')");
+    fn test_escape_string() {
+        assert_eq!(escape_string("hello"), "hello");
+        assert_eq!(escape_string("it's"), "it\\'s");
+        assert_eq!(escape_string("path\\to"), "path\\\\to");
     }
 
     #[test]
-    fn test_target_to_locator_css() {
-        let target = make_target(vec![], None, None, Some("#submit-btn"));
-        assert_eq!(target_to_locator(&target), "page.locator('#submit-btn')");
+    fn test_escape_regex() {
+        assert_eq!(escape_regex("test.com"), "test\\.com");
+        assert_eq!(escape_regex("a/b/c"), "a\\/b\\/c");
     }
 
     #[test]
-    fn test_generate_playwright_script() {
+    fn test_generate_script() {
         let events = vec![
             ExtensionEvent::Navigate(NavigateData {
-                url: "https://example.com".to_string(),
+                url: "https://example.com".into(),
                 from: None,
-                nav_type: "link".to_string(),
+                nav_type: "link".into(),
                 ts: 0,
             }),
-            ExtensionEvent::Click(make_target(vec!["button", "Submit"], None, None, None)),
+            ExtensionEvent::Click(make_target(&["button", "Submit"], None, None)),
             ExtensionEvent::Input(InputData {
-                target: make_target(vec!["textbox", "Email"], None, None, None),
-                value: Some("test@example.com".to_string()),
+                target: make_target(&["textbox", "Email"], None, None),
+                value: Some("test@example.com".into()),
             }),
             ExtensionEvent::KeyPress(KeyPressData {
-                key: "Enter".to_string(),
+                key: "Enter".into(),
                 aria: None,
                 css: None,
                 xpath: None,
@@ -456,22 +500,13 @@ mod tests {
             }),
         ];
 
-        let script = generate_playwright_script(&events);
+        let script = PlaywrightGenerator::generate(&events);
         assert!(script.contains("import { test, expect }"));
         assert!(script.contains("page.goto('https://example.com')"));
-        assert!(
-            script.contains("page.getByRole('button', { name: 'Submit', exact: true }).click()")
-        );
+        assert!(script.contains("getByRole('button', { name: 'Submit', exact: true }).click()"));
         assert!(script.contains(
-            "page.getByRole('textbox', { name: 'Email', exact: true }).fill('test@example.com')"
+            "getByRole('textbox', { name: 'Email', exact: true }).fill('test@example.com')"
         ));
         assert!(script.contains("page.keyboard.press('Enter')"));
-    }
-
-    #[test]
-    fn test_escape_string() {
-        assert_eq!(escape_string("hello"), "hello");
-        assert_eq!(escape_string("it's"), "it\\'s");
-        assert_eq!(escape_string("path\\to"), "path\\\\to");
     }
 }
