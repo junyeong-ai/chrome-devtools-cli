@@ -28,8 +28,8 @@ fn find_navigation_start(events: &[TraceEvent]) -> f64 {
             events
                 .iter()
                 .map(|e| e.timestamp)
-                .filter(|&ts| ts > 0.0)
-                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                .filter(|&ts| ts > 0.0 && ts.is_finite())
+                .min_by(|a, b| a.total_cmp(b))
                 .unwrap_or(0.0)
         })
 }
@@ -62,8 +62,9 @@ fn calculate_lcp(events: &[TraceEvent], nav_start: f64) -> Option<f64> {
                 .and_then(|args| args.get("data"))
                 .and_then(|data| data.get("size"))
                 .and_then(|s| s.as_f64())
+                .filter(|v| v.is_finite())
         })
-        .max_by(|a, b| a.partial_cmp(b).unwrap())
+        .max_by(|a, b| a.total_cmp(b))
         .map(|_| {
             events
                 .iter()
