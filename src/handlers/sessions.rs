@@ -5,6 +5,7 @@ use crate::{
         collectors::{
             ConsoleLevel, ConsoleMessage, DevToolsIssue, ExtensionEvent, NetworkRequest, PageError,
         },
+        event_store::EventMetadata,
     },
     output::{self, OutputFormatter},
 };
@@ -178,15 +179,17 @@ impl<T: Serialize> OutputFormatter for PaginatedResult<T> {
 pub fn handle_list() -> Result<SessionList> {
     let sessions = SessionStorage::list_sessions()?;
     let mut infos = Vec::new();
+    let collections = ["network", "console", "pageerror", "issues"];
 
     for session_id in sessions {
         if let Ok(storage) = SessionStorage::from_session_id(&session_id) {
+            let counts = storage.count_collections(&collections);
             infos.push(SessionInfo {
                 session_id,
-                network_count: storage.count("network"),
-                console_count: storage.count("console"),
-                pageerror_count: storage.count("pageerror"),
-                issues_count: storage.count("issues"),
+                network_count: *counts.get("network").unwrap_or(&0),
+                console_count: *counts.get("console").unwrap_or(&0),
+                pageerror_count: *counts.get("pageerror").unwrap_or(&0),
+                issues_count: *counts.get("issues").unwrap_or(&0),
             });
         }
     }
