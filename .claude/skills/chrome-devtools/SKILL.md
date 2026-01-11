@@ -152,11 +152,16 @@ chrome-devtools-cli devices    # List available presets
 
 | Type | When | Key Data |
 |------|------|----------|
-| `click` | Mouse click | selector, coordinates, URL |
-| `input` | Form field change | selector, value |
-| `keypress` | Enter/Tab/Escape | key, selector |
-| `scroll` | Page scroll | x, y position |
-| `navigate` | Page load/SPA transition | URL, type |
+| `click` | Mouse click | aria, css, xpath, rect, url, ts |
+| `input` | Form field change | aria, css, value, url, ts |
+| `select` | Dropdown selection | aria, css, value, url, ts |
+| `hover` | Element hover | aria, css, rect, url, ts |
+| `scroll` | Page scroll | x, y, url, ts |
+| `keypress` | Enter/Tab/Escape | key, aria, css, url, ts |
+| `screenshot` | Extension capture | filename, url, ts |
+| `snapshot` | DOM snapshot | html, url, ts |
+| `dialog` | Alert/confirm/prompt | ok, url, ts |
+| `navigate` | Page load/SPA transition | url, nav_type, ts |
 
 ## Troubleshooting
 

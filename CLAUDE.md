@@ -108,15 +108,19 @@ impl OutputFormatter for MyResult {
 ```
 ~/.config/chrome-devtools-cli/
 ├── sessions/{id}/              # Per-session data
-│   ├── extension.ndjson        # User events (click, input, scroll, keypress)
-│   ├── network.ndjson          # HTTP requests/responses
-│   ├── console.ndjson          # Console messages
-│   ├── trace.ndjson            # CDP trace events (Tracing domain)
+│   ├── events.db               # SQLite database (all events unified)
+│   ├── events.db-shm           # SQLite shared memory
+│   ├── events.db-wal           # SQLite write-ahead log
+│   ├── screenshots/            # Screenshot files
 │   └── recordings/{rid}/       # Frame JPEGs + metadata.json
 ├── extension/                  # Built extension files
 ├── chrome-for-testing/         # Browser binary
 └── config.toml                 # User config (user_data_dir for profile path)
 ```
+
+**SQLite Schema** (`events.db`):
+- `events` table: `id`, `event_type`, `data` (JSON), `timestamp_ms`
+- Event types: `click`, `input`, `select`, `hover`, `scroll`, `keypress`, `screenshot`, `snapshot`, `dialog`, `navigate`, `network`, `console`, `error`, `trace`
 
 ---
 
@@ -126,11 +130,15 @@ impl OutputFormatter for MyResult {
 |-------|---------|------------|
 | `click` | pointerdown/click | aria, css, xpath, rect, url, ts |
 | `input` | focusout/beforeunload | aria, css, value, url, ts |
-| `keypress` | keydown (Enter/Tab/Escape) | key, aria, css, url, ts |
+| `select` | select element change | aria, css, value, url, ts |
+| `hover` | mouseenter (explicit) | aria, css, rect, url, ts |
 | `scroll` | scroll (300ms debounce) | x, y, url, ts |
+| `keypress` | keydown (Enter/Tab/Escape) | key, aria, css, url, ts |
+| `screenshot` | extension capture | filename, url, ts |
+| `snapshot` | DOM snapshot | html, url, ts |
+| `dialog` | alert/confirm/prompt | ok (accept/dismiss), url, ts |
 | `navigate` | load/pushState/popState | url, nav_type, ts |
 | `recording_start/stop` | HTTP API | recording_id, ts |
-| `trace_start/stop` | HTTP API | trace_id, ts |
 
 ---
 

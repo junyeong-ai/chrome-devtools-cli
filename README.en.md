@@ -138,21 +138,84 @@ chrome-devtools-cli config edit    # Edit in editor
 
 ## Command Reference
 
+### Navigation
 | Command | Description |
 |---------|-------------|
 | `navigate <url>` | Navigate to URL |
-| `screenshot` | Take screenshot |
+| `reload` | Reload page |
+| `back` | Go back |
+| `forward` | Go forward |
+| `stop` | Stop browser session |
+
+### Page Management
+| Command | Description |
+|---------|-------------|
+| `pages` | List open pages |
+| `select-page <index>` | Select active page |
+| `new-page` | Create new page |
+| `close-page <index>` | Close page |
+
+### Interaction
+| Command | Description |
+|---------|-------------|
 | `click <selector>` | Click element |
+| `hover <selector>` | Hover element |
 | `fill <selector> <text>` | Fill input field |
 | `type <selector> <text>` | Type with delay |
 | `press <key>` | Press key |
+| `scroll <selector>` | Scroll to element |
 | `select <selector>` | Select dropdown |
-| `trace <url>` | Capture trace during page load |
+| `dialog` | Handle JavaScript dialog |
+| `wait <selector>` | Wait for condition |
+
+### Capture & Analysis
+| Command | Description |
+|---------|-------------|
+| `screenshot` | Take screenshot |
+| `pdf` | Export PDF |
+| `trace <url>` | Capture performance trace |
 | `analyze <file>` | Analyze trace (Core Web Vitals) |
-| `emulate <device>` | Device emulation |
+
+### DOM & Debugging
+| Command | Description |
+|---------|-------------|
+| `query <selector>` | Query elements |
+| `inspect <selector>` | Inspect element properties |
+| `dom` | Get DOM tree structure |
+| `a11y` | Get accessibility tree |
+| `listeners` | Get event listeners |
+| `html` | Get page HTML |
 | `eval <expr>` | Execute JavaScript |
+
+### Data Collection
+| Command | Description |
+|---------|-------------|
+| `console` | View console messages |
+| `network` | List network requests |
+| `cookies` | Manage cookies |
+| `storage` | Access browser storage |
+
+### Device Emulation
+| Command | Description |
+|---------|-------------|
+| `emulate <device>` | Device emulation |
+| `viewport <w> <h>` | Set viewport size |
+| `devices` | List available devices |
+
+### History & Session
+| Command | Description |
+|---------|-------------|
 | `history events` | Query events |
 | `history export` | Generate Playwright script |
+| `session-info` | Get session information |
+| `session` | Session management (daemon mode) |
+| `auth` | Authentication state management |
+
+### Config & Server
+| Command | Description |
+|---------|-------------|
+| `config` | Configuration management |
+| `server` | Daemon server management |
 
 ### Common Options
 - `--json` — JSON output

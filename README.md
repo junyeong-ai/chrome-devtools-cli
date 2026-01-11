@@ -138,21 +138,84 @@ chrome-devtools-cli config edit    # 에디터로 편집
 
 ## 명령어 참조
 
+### 네비게이션
 | 명령어 | 설명 |
 |--------|------|
 | `navigate <url>` | URL 이동 |
-| `screenshot` | 스크린샷 |
+| `reload` | 페이지 새로고침 |
+| `back` | 뒤로 가기 |
+| `forward` | 앞으로 가기 |
+| `stop` | 브라우저 세션 중지 |
+
+### 페이지 관리
+| 명령어 | 설명 |
+|--------|------|
+| `pages` | 열린 페이지 목록 |
+| `select-page <index>` | 활성 페이지 선택 |
+| `new-page` | 새 페이지 생성 |
+| `close-page <index>` | 페이지 닫기 |
+
+### 인터랙션
+| 명령어 | 설명 |
+|--------|------|
 | `click <selector>` | 요소 클릭 |
+| `hover <selector>` | 요소 호버 |
 | `fill <selector> <text>` | 입력 필드 채우기 |
 | `type <selector> <text>` | 타이핑 (딜레이) |
 | `press <key>` | 키 입력 |
+| `scroll <selector>` | 요소로 스크롤 |
 | `select <selector>` | 드롭다운 선택 |
-| `trace <url>` | 페이지 로드 중 트레이스 캡처 |
+| `dialog` | JavaScript 다이얼로그 처리 |
+| `wait <selector>` | 조건 대기 |
+
+### 캡처 & 분석
+| 명령어 | 설명 |
+|--------|------|
+| `screenshot` | 스크린샷 |
+| `pdf` | PDF 내보내기 |
+| `trace <url>` | 성능 트레이스 캡처 |
 | `analyze <file>` | 트레이스 분석 (Core Web Vitals) |
-| `emulate <device>` | 디바이스 에뮬레이션 |
+
+### DOM & 디버깅
+| 명령어 | 설명 |
+|--------|------|
+| `query <selector>` | 요소 검색 |
+| `inspect <selector>` | 요소 속성 검사 |
+| `dom` | DOM 트리 구조 |
+| `a11y` | 접근성 트리 |
+| `listeners` | 이벤트 리스너 조회 |
+| `html` | 페이지 HTML |
 | `eval <expr>` | JavaScript 실행 |
+
+### 데이터 수집
+| 명령어 | 설명 |
+|--------|------|
+| `console` | 콘솔 메시지 |
+| `network` | 네트워크 요청 |
+| `cookies` | 쿠키 관리 |
+| `storage` | 브라우저 스토리지 |
+
+### 디바이스 에뮬레이션
+| 명령어 | 설명 |
+|--------|------|
+| `emulate <device>` | 디바이스 에뮬레이션 |
+| `viewport <w> <h>` | 뷰포트 크기 설정 |
+| `devices` | 사용 가능 디바이스 목록 |
+
+### 히스토리 & 세션
+| 명령어 | 설명 |
+|--------|------|
 | `history events` | 이벤트 조회 |
 | `history export` | Playwright 스크립트 생성 |
+| `session-info` | 현재 세션 정보 |
+| `session` | 세션 관리 (데몬 모드) |
+| `auth` | 인증 상태 관리 |
+
+### 설정 & 서버
+| 명령어 | 설명 |
+|--------|------|
+| `config` | 설정 관리 |
+| `server` | 데몬 서버 관리 |
 
 ### 공통 옵션
 - `--json` — JSON 출력
