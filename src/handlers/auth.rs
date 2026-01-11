@@ -254,9 +254,10 @@ pub async fn handle_auth_import(
         }
 
         if let Ok(built) = params.build()
-            && page.execute(built).await.is_ok() {
-                cookies_imported += 1;
-            }
+            && page.execute(built).await.is_ok()
+        {
+            cookies_imported += 1;
+        }
     }
 
     let mut origins_imported = 0;
