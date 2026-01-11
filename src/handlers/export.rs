@@ -1,4 +1,5 @@
 use crate::chrome::collectors::{ExtensionEvent, TargetInfo};
+use crate::chrome::event_store::EventMetadata;
 use crate::chrome::storage::SessionStorage;
 use crate::output::OutputFormatter;
 use crate::{ChromeError, Result};
@@ -133,66 +134,217 @@ fn filter_by_recording(events: &[ExtensionEvent], recording_id: &str) -> Vec<Ext
         .collect()
 }
 
-fn generate_playwright_script(events: &[ExtensionEvent]) -> String {
-    let mut lines = vec![
-        "import { test, expect } from '@playwright/test';".to_string(),
-        String::new(),
-        "test('recorded session', async ({ page }) => {".to_string(),
-    ];
-
-    let mut last_url: Option<String> = None;
-
-    for event in events {
-        if let Some(code) = event_to_playwright(event, &mut last_url) {
-            lines.push(format!("  {}", code));
-        }
-    }
-
-    lines.push("});".to_string());
-    lines.join("\n")
+struct PlaywrightGenerator {
+    lines: Vec<String>,
+    last_url: Option<String>,
+    indent: usize,
+    action_count: usize,
 }
 
-fn event_to_playwright(event: &ExtensionEvent, last_url: &mut Option<String>) -> Option<String> {
-    match event {
-        ExtensionEvent::Navigate(data) => {
-            if last_url.as_ref() != Some(&data.url) {
-                *last_url = Some(data.url.clone());
-                Some(format!("await page.goto('{}');", escape_string(&data.url)))
-            } else {
-                None
-            }
+impl PlaywrightGenerator {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            last_url: None,
+            indent: 2,
+            action_count: 0,
         }
-        ExtensionEvent::Click(target) => {
-            let locator = target_to_locator(target);
-            Some(format!("await {}.click();", locator))
-        }
-        ExtensionEvent::Input(data) => {
-            let locator = target_to_locator(&data.target);
-            let value = data.value.as_deref().unwrap_or("");
-            Some(format!(
-                "await {}.fill('{}');",
-                locator,
-                escape_string(value)
-            ))
-        }
-        ExtensionEvent::Scroll(data) => {
-            Some(format!("await page.mouse.wheel({}, {});", data.x, data.y))
-        }
-        ExtensionEvent::KeyPress(data) => Some(format!(
-            "await page.keyboard.press('{}');",
-            escape_string(&data.key)
-        )),
-        ExtensionEvent::Select(target) => {
-            let locator = target_to_locator(target);
-            Some(format!("await {}.click();", locator))
-        }
-        ExtensionEvent::Hover(_)
-        | ExtensionEvent::Screenshot(_)
-        | ExtensionEvent::Snapshot(_)
-        | ExtensionEvent::Dialog(_)
-        | ExtensionEvent::RecordingStart(_)
-        | ExtensionEvent::RecordingStop(_) => None,
     }
+
+    fn add(&mut self, line: impl Into<String>) {
+        let indent = " ".repeat(self.indent);
+        self.lines.push(format!("{}{}", indent, line.into()));
+    }
+
+    fn add_empty(&mut self) {
+        self.lines.push(String::new());
+    }
+
+    fn generate(mut self, events: &[ExtensionEvent]) -> String {
+        self.lines
+            .push("import { test, expect } from '@playwright/test';".to_string());
+        self.add_empty();
+
+        let test_name = self.infer_test_name(events);
+        self.lines
+            .push(format!("test('{}', async ({{ page }}) => {{", test_name));
+
+        let grouped = self.group_events(events);
+
+        for group in grouped {
+            self.process_event_group(&group);
+        }
+
+        if self.action_count > 0 {
+            self.add_empty();
+        }
+
+        self.lines.push("});".to_string());
+        self.lines.join("\n")
+    }
+
+    fn infer_test_name(&self, events: &[ExtensionEvent]) -> String {
+        let has_login = events.iter().any(|e| {
+            if let ExtensionEvent::Navigate(d) = e {
+                d.url.contains("login") || d.url.contains("signin")
+            } else if let ExtensionEvent::Input(d) = e {
+                d.target
+                    .aria
+                    .iter()
+                    .any(|a| a.to_lowercase().contains("password"))
+            } else {
+                false
+            }
+        });
+
+        let has_form = events.iter().any(|e| matches!(e, ExtensionEvent::Input(_)));
+
+        if has_login {
+            "user login flow".to_string()
+        } else if has_form {
+            "form submission flow".to_string()
+        } else {
+            "recorded user flow".to_string()
+        }
+    }
+
+    fn group_events(&self, events: &[ExtensionEvent]) -> Vec<EventGroup> {
+        let mut groups = Vec::new();
+        let mut i = 0;
+
+        while i < events.len() {
+            let event = &events[i];
+            let next_event = events.get(i + 1);
+
+            let group = EventGroup {
+                action: event.clone(),
+                causes_navigation: self.causes_navigation(event, next_event),
+            };
+            groups.push(group);
+            i += 1;
+        }
+
+        groups
+    }
+
+    fn causes_navigation(&self, event: &ExtensionEvent, next: Option<&ExtensionEvent>) -> bool {
+        if let ExtensionEvent::Click(target) = event {
+            let is_submit = target.aria.iter().any(|a| {
+                let lower = a.to_lowercase();
+                lower.contains("submit") || lower.contains("login") || lower.contains("sign")
+            });
+            let next_is_nav = matches!(next, Some(ExtensionEvent::Navigate(_)));
+            is_submit || next_is_nav
+        } else if let ExtensionEvent::KeyPress(k) = event {
+            k.key == "Enter"
+        } else {
+            false
+        }
+    }
+
+    fn process_event_group(&mut self, group: &EventGroup) {
+        match &group.action {
+            ExtensionEvent::Navigate(data) => {
+                if self.last_url.as_ref() != Some(&data.url) {
+                    self.last_url = Some(data.url.clone());
+                    self.add(format!("await page.goto('{}');", escape_string(&data.url)));
+                    self.add(format!(
+                        "await expect(page).toHaveURL(/{}/);\n",
+                        extract_url_pattern(&data.url)
+                    ));
+                    self.action_count += 1;
+                }
+            }
+            ExtensionEvent::Click(target) => {
+                let locator = target_to_locator(target);
+                self.add(format!("await expect({}).toBeVisible();", locator));
+                self.add(format!("await {}.click();", locator));
+
+                if group.causes_navigation {
+                    self.add("await page.waitForLoadState('networkidle');");
+                }
+                self.add_empty();
+                self.action_count += 1;
+            }
+            ExtensionEvent::Input(data) => {
+                let locator = target_to_locator(&data.target);
+                let value = data.value.as_deref().unwrap_or("");
+                self.add(format!("await expect({}).toBeVisible();", locator));
+                self.add(format!(
+                    "await {}.fill('{}');",
+                    locator,
+                    escape_string(value)
+                ));
+                if !value.is_empty() {
+                    self.add(format!(
+                        "await expect({}).toHaveValue('{}');",
+                        locator,
+                        escape_string(value)
+                    ));
+                }
+                self.add_empty();
+                self.action_count += 1;
+            }
+            ExtensionEvent::Scroll(data) => {
+                self.add(format!("await page.mouse.wheel({}, {});", data.x, data.y));
+                self.action_count += 1;
+            }
+            ExtensionEvent::KeyPress(data) => {
+                self.add(format!(
+                    "await page.keyboard.press('{}');",
+                    escape_string(&data.key)
+                ));
+                if data.key == "Enter" && group.causes_navigation {
+                    self.add("await page.waitForLoadState('networkidle');");
+                }
+                self.add_empty();
+                self.action_count += 1;
+            }
+            ExtensionEvent::Select(target) => {
+                let locator = target_to_locator(target);
+                self.add(format!("await {}.click();", locator));
+                self.action_count += 1;
+            }
+            ExtensionEvent::Dialog(data) => {
+                if data.ok {
+                    self.add("page.on('dialog', dialog => dialog.accept());");
+                } else {
+                    self.add("page.on('dialog', dialog => dialog.dismiss());");
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+struct EventGroup {
+    action: ExtensionEvent,
+    causes_navigation: bool,
+}
+
+fn extract_url_pattern(url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let path = parsed.path();
+        if path.len() > 1 {
+            return escape_regex(&path[1..]);
+        }
+    }
+    escape_regex(url)
+}
+
+fn escape_regex(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '.' | '*' | '+' | '?' | '^' | '$' | '{' | '}' | '[' | ']' | '|' | '(' | ')' | '\\' => {
+                format!("\\{}", c)
+            }
+            _ => c.to_string(),
+        })
+        .collect()
+}
+
+fn generate_playwright_script(events: &[ExtensionEvent]) -> String {
+    PlaywrightGenerator::new().generate(events)
 }
 
 fn target_to_locator(target: &TargetInfo) -> String {
