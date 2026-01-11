@@ -7,6 +7,9 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "idb": "^8.0.0"
+  },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.24.0",
     "@types/chrome": "^0.0.287",

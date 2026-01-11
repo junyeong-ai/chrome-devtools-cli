@@ -1,9 +1,14 @@
+import * as RecordingStore from './lib/recording-store';
+import { getConnection, DaemonConnection } from './lib/daemon-connection';
+
 const API_BASE = 'http://127.0.0.1:9223';
 const MIN_CAPTURE_INTERVAL = 100;
 const RETRY_DELAY = 300;
 const MAX_RETRIES = 3;
-const RECORDING_STATE_KEY = 'recordingState';
 const TRACE_STATE_KEY = 'traceState';
+
+let wsConnection: DaemonConnection | null = null;
+let useWebSocket = true;
 
 interface ScreenRecordingState {
   id: string;
@@ -15,7 +20,6 @@ interface ScreenRecordingState {
   dpr: number;
   frameCount: number;
   startTime: number;
-  frames: string[];
 }
 
 interface PerformanceTraceState {
@@ -31,23 +35,34 @@ let tracing: PerformanceTraceState | null = null;
 
 async function saveRecordingState(): Promise<void> {
   if (recording) {
-    const { frames, ...stateWithoutFrames } = recording;
-    await chrome.storage.session.set({ [RECORDING_STATE_KEY]: stateWithoutFrames });
-  } else {
-    await chrome.storage.session.remove(RECORDING_STATE_KEY);
+    await RecordingStore.updateRecording({
+      id: recording.id,
+      frameCount: recording.frameCount,
+      isActive: recording.isActive,
+    });
   }
 }
 
 async function restoreRecordingState(): Promise<void> {
   if (recording) return;
 
-  const result = await chrome.storage.session.get(RECORDING_STATE_KEY);
-  const savedState = result[RECORDING_STATE_KEY];
-
-  if (savedState?.isActive) {
-    recording = { ...savedState, frames: [] };
+  const activeRecording = await RecordingStore.getActiveRecording();
+  if (activeRecording) {
+    recording = {
+      id: activeRecording.id,
+      tabId: activeRecording.tabId,
+      windowId: activeRecording.windowId,
+      isActive: true,
+      fps: activeRecording.fps,
+      quality: activeRecording.quality,
+      dpr: activeRecording.dpr,
+      frameCount: activeRecording.frameCount,
+      startTime: activeRecording.startTime,
+    };
     startFrameCapture();
   }
+
+  RecordingStore.cleanOldRecordings().catch(() => {});
 }
 
 function startFrameCapture(): void {
@@ -73,9 +88,18 @@ function startFrameCapture(): void {
       if (recording?.isActive && dataUrl) {
         const resized = await resizeToLogicalPixels(dataUrl, recording.quality, recording.dpr);
         const offsetMs = Date.now() - recording.startTime;
-        recording.frames.push(resized);
+
+        await RecordingStore.saveFrame({
+          recordingId: recording.id,
+          index: recording.frameCount,
+          data: resized,
+          offsetMs,
+          timestamp: Date.now(),
+        });
+
         sendFrame(recording.id, recording.frameCount, offsetMs, resized);
         recording.frameCount++;
+
         if (recording.frameCount % 10 === 0) {
           saveRecordingState();
         }
@@ -110,6 +134,23 @@ async function getSessionId(): Promise<string | null> {
     }
   } catch {}
   return null;
+}
+
+async function initWebSocket(): Promise<void> {
+  const sessionId = await getSessionId();
+  if (!sessionId) {
+    setTimeout(initWebSocket, 5000);
+    return;
+  }
+
+  wsConnection = getConnection();
+  wsConnection.on('connected', () => {
+    console.log('[Chrome DevTools CLI] WebSocket connected');
+  });
+  wsConnection.on('reconnecting', (data) => {
+    console.log('[Chrome DevTools CLI] WebSocket reconnecting...', data);
+  });
+  wsConnection.connect(sessionId);
 }
 
 async function getActiveTab(): Promise<chrome.tabs.Tab | null> {
@@ -160,6 +201,10 @@ async function sendFrame(recordingId: string, index: number, offsetMs: number, d
 }
 
 async function sendSessionEvent(event: object): Promise<boolean> {
+  if (useWebSocket && wsConnection?.getState() === 'connected') {
+    wsConnection.sendEvent(event);
+    return true;
+  }
   const result = await api('/api/events', { event });
   return result.ok;
 }
@@ -364,6 +409,7 @@ async function startRecording(
   }
 
   const dpr = await getDpr(tabId);
+  const startTime = Date.now();
 
   recording = {
     id: recordingId,
@@ -374,11 +420,21 @@ async function startRecording(
     quality,
     dpr,
     frameCount: 0,
-    startTime: Date.now(),
-    frames: [],
+    startTime,
   };
 
-  await saveRecordingState();
+  await RecordingStore.createRecording({
+    id: recordingId,
+    tabId,
+    windowId,
+    fps,
+    quality,
+    dpr,
+    startTime,
+    frameCount: 0,
+    isActive: true,
+  });
+
   await showRecordingIndicator(tabId);
   startFrameCapture();
 
@@ -390,7 +446,7 @@ async function stopRecording(): Promise<object> {
     return { error: 'Not recording' };
   }
 
-  const { id, tabId, frameCount, startTime, frames, fps } = recording;
+  const { id, tabId, frameCount, startTime, fps } = recording;
   recording.isActive = false;
 
   if (recordingInterval) {
@@ -402,12 +458,21 @@ async function stopRecording(): Promise<object> {
 
   const durationMs = Date.now() - startTime;
   await stopRecordingOnServer(id, frameCount, durationMs);
+
+  await RecordingStore.updateRecording({
+    id,
+    isActive: false,
+    endTime: Date.now(),
+    frameCount,
+  });
+
+  const recordingData = await RecordingStore.getRecordingWithFrames(id);
+  const frames = recordingData?.frames ?? [];
+
   showRecordingPreview(tabId, frames, fps, durationMs);
 
   const result = { recording_id: id, frameCount, durationMs };
   recording = null;
-
-  await saveRecordingState();
 
   return result;
 }
@@ -881,5 +946,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
   }
 });
+
+initWebSocket();
 
 export {};
