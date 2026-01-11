@@ -145,7 +145,7 @@ pub enum Command {
         selector: String,
         #[arg(long, short = 'a', help = "Include HTML attributes")]
         attributes: bool,
-        #[arg(long, short = 's', help = "Include computed styles")]
+        #[arg(long, help = "Include computed styles")]
         styles: bool,
         #[arg(long, short = 'b', help = "Include bounding box")]
         r#box: bool,
@@ -325,6 +325,12 @@ pub enum Command {
     Session {
         #[command(subcommand)]
         subcommand: SessionCommand,
+    },
+
+    #[command(about = "Authentication state management (Playwright storageState)")]
+    Auth {
+        #[command(subcommand)]
+        subcommand: AuthCommand,
     },
 }
 
@@ -612,5 +618,24 @@ pub enum SessionCommand {
     Info {
         #[arg(help = "Session ID")]
         session_id: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AuthCommand {
+    #[command(about = "Export auth state to Playwright storageState format")]
+    Export {
+        #[arg(
+            short,
+            long,
+            help = "Output file path (e.g., playwright/.auth/user.json)"
+        )]
+        output: Option<PathBuf>,
+    },
+
+    #[command(about = "Import auth state from Playwright storageState file")]
+    Import {
+        #[arg(help = "Input storageState file")]
+        input: PathBuf,
     },
 }

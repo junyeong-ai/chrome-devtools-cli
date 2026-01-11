@@ -47,8 +47,30 @@ pub struct Cli {
     pub user_profile: bool,
 }
 
+impl Cli {
+    pub fn with_env_context(mut self) -> Self {
+        if self.session.is_none() {
+            self.session = std::env::var("CHROME_SESSION").ok();
+        }
+
+        if !self.user_profile {
+            self.user_profile = std::env::var("CHROME_USER_PROFILE")
+                .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(false);
+        }
+
+        if self.headless.is_none() {
+            self.headless = std::env::var("CHROME_HEADLESS")
+                .ok()
+                .map(|v| v != "0" && v.to_lowercase() != "false");
+        }
+
+        self
+    }
+}
+
 pub async fn run() -> crate::Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse().with_env_context();
 
     let config = if let Some(config_path) = &cli.config {
         let content = std::fs::read_to_string(config_path)?;
