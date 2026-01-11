@@ -21,6 +21,7 @@
 //! - `dialog.behavior = "none"`: Do not auto-handle (will stall page execution)
 //! - `dialog.prompt_text`: Text to enter for prompt dialogs when auto-accepting
 
+use crate::chrome::event_store::EventMetadata;
 use crate::config::DialogBehavior;
 use crate::{ChromeError, Result};
 use chromiumoxide::Page;
@@ -65,14 +66,32 @@ pub struct Dialog {
     pub timestamp: DateTime<Utc>,
 }
 
+impl EventMetadata for Dialog {
+    fn event_type(&self) -> &'static str {
+        "dialog"
+    }
+    fn timestamp_ms(&self) -> Option<u64> {
+        Some(self.timestamp.timestamp_millis() as u64)
+    }
+}
+
 /// Represents the result of auto-handling a dialog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DialogResult {
     pub dialog_type: DialogType,
     pub message: String,
-    pub action: String, // "accepted", "dismissed", or "pending"
+    pub action: String,
     pub prompt_text: Option<String>,
     pub timestamp: DateTime<Utc>,
+}
+
+impl EventMetadata for DialogResult {
+    fn event_type(&self) -> &'static str {
+        "dialog_result"
+    }
+    fn timestamp_ms(&self) -> Option<u64> {
+        Some(self.timestamp.timestamp_millis() as u64)
+    }
 }
 
 pub struct DialogCollector {

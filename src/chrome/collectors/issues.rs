@@ -1,3 +1,4 @@
+use crate::chrome::event_store::EventMetadata;
 use crate::{ChromeError, Result};
 use chromiumoxide::{Page, cdp::browser_protocol::audits::EventIssueAdded};
 use chrono::{DateTime, Utc};
@@ -14,6 +15,15 @@ pub struct DevToolsIssue {
     pub details: Option<String>,
     pub url: Option<String>,
     pub timestamp: DateTime<Utc>,
+}
+
+impl EventMetadata for DevToolsIssue {
+    fn event_type(&self) -> &'static str {
+        "issue"
+    }
+    fn timestamp_ms(&self) -> Option<u64> {
+        Some(self.timestamp.timestamp_millis() as u64)
+    }
 }
 
 pub struct IssuesCollector {

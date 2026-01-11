@@ -1,3 +1,4 @@
+use crate::chrome::event_store::EventMetadata;
 use crate::{ChromeError, Result, config::FilterConfig};
 use chromiumoxide::{
     Page,
@@ -55,6 +56,21 @@ pub struct ConsoleMessage {
     pub timestamp: DateTime<Utc>,
     pub url: Option<String>,
     pub line: Option<i64>,
+}
+
+impl EventMetadata for ConsoleMessage {
+    fn event_type(&self) -> &'static str {
+        match self.level {
+            ConsoleLevel::Log => "log",
+            ConsoleLevel::Debug => "debug",
+            ConsoleLevel::Info => "info",
+            ConsoleLevel::Warning => "warning",
+            ConsoleLevel::Error => "error",
+        }
+    }
+    fn timestamp_ms(&self) -> Option<u64> {
+        Some(self.timestamp.timestamp_millis() as u64)
+    }
 }
 
 pub struct ConsoleCollector {

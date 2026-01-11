@@ -1,3 +1,4 @@
+use crate::chrome::event_store::EventMetadata;
 use crate::{ChromeError, Result};
 use chromiumoxide::{Page, cdp::js_protocol::runtime::EventExceptionThrown};
 use chrono::{DateTime, Utc};
@@ -15,6 +16,15 @@ pub struct PageError {
     pub column: i64,
     pub stack_trace: Option<String>,
     pub timestamp: DateTime<Utc>,
+}
+
+impl EventMetadata for PageError {
+    fn event_type(&self) -> &'static str {
+        "pageerror"
+    }
+    fn timestamp_ms(&self) -> Option<u64> {
+        Some(self.timestamp.timestamp_millis() as u64)
+    }
 }
 
 pub struct PageErrorCollector {

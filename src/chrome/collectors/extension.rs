@@ -1,3 +1,4 @@
+use crate::chrome::event_store::EventMetadata;
 use crate::chrome::storage::SessionStorage;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -22,8 +23,25 @@ pub enum ExtensionEvent {
     RecordingStop(RecordingMarker),
 }
 
-impl ExtensionEvent {
-    pub fn timestamp_ms(&self) -> Option<u64> {
+impl EventMetadata for ExtensionEvent {
+    fn event_type(&self) -> &'static str {
+        match self {
+            Self::Click(_) => "click",
+            Self::Input(_) => "input",
+            Self::Select(_) => "select",
+            Self::Hover(_) => "hover",
+            Self::Scroll(_) => "scroll",
+            Self::KeyPress(_) => "keypress",
+            Self::Screenshot(_) => "screenshot",
+            Self::Snapshot(_) => "snapshot",
+            Self::Dialog(_) => "dialog",
+            Self::Navigate(_) => "navigate",
+            Self::RecordingStart(_) => "recording_start",
+            Self::RecordingStop(_) => "recording_stop",
+        }
+    }
+
+    fn timestamp_ms(&self) -> Option<u64> {
         match self {
             Self::Click(t) | Self::Select(t) | Self::Hover(t) => t.ts,
             Self::Input(d) => d.target.ts,

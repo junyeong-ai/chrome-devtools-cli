@@ -1,3 +1,4 @@
+use crate::chrome::event_store::EventMetadata;
 use crate::{ChromeError, Result, config::FilterConfig};
 use chromiumoxide::{
     Page,
@@ -30,6 +31,15 @@ pub struct NetworkRequest {
     pub response_body: Option<String>,
     pub response_size: Option<i64>,
     pub timestamp: DateTime<Utc>,
+}
+
+impl EventMetadata for NetworkRequest {
+    fn event_type(&self) -> &'static str {
+        "network"
+    }
+    fn timestamp_ms(&self) -> Option<u64> {
+        Some(self.timestamp.timestamp_millis() as u64)
+    }
 }
 
 #[derive(Debug, Clone)]

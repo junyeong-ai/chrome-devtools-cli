@@ -1,3 +1,4 @@
+use crate::chrome::event_store::EventMetadata;
 use crate::chrome::storage::SessionStorage;
 use crate::{ChromeError, Result};
 use chromiumoxide::Page;
@@ -48,6 +49,15 @@ pub struct TraceData {
     pub duration_ms: u64,
     pub event_count: usize,
     pub events: Vec<serde_json::Value>,
+}
+
+impl EventMetadata for TraceData {
+    fn event_type(&self) -> &'static str {
+        "trace"
+    }
+    fn timestamp_ms(&self) -> Option<u64> {
+        Some(self.start_time)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
