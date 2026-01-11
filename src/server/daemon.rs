@@ -909,6 +909,23 @@ async fn handle_request(
             Response::success(id, serde_json::to_value(&status).unwrap_or_default())
         }
 
+        // === Auth (Playwright storageState) ===
+        "auth.export" => {
+            let session = get_session!();
+            let output = opt_str!(params, "output").map(std::path::Path::new);
+            handlers::auth::handle_auth_export(session.as_ref(), output)
+                .await
+                .to_response(id)
+        }
+
+        "auth.import" => {
+            let session = get_session!();
+            let input = require_str!("input");
+            handlers::auth::handle_auth_import(session.as_ref(), std::path::Path::new(input))
+                .await
+                .to_response(id)
+        }
+
         _ => Response::error(
             id,
             error_codes::METHOD_NOT_FOUND,

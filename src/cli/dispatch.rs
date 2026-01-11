@@ -1,8 +1,8 @@
 use super::{
     Cli,
     commands::{
-        Command, ConfigCommand, CookiesCommand, HistoryCommand, ServerCommand, SessionCommand,
-        StorageCommand,
+        AuthCommand, Command, ConfigCommand, CookiesCommand, HistoryCommand, ServerCommand,
+        SessionCommand, StorageCommand,
     },
 };
 use crate::{
@@ -84,6 +84,7 @@ pub async fn dispatch(mut cli: Cli, config: Arc<Config>) -> Result<()> {
         Command::Session { subcommand } => handle_session_command(subcommand, &cli, &config).await,
         Command::Config { subcommand } => handle_config_command(subcommand, &cli).await,
         Command::History { subcommand } => handle_history_command(subcommand, &cli, &config).await,
+        Command::Auth { subcommand } => handle_auth_command(subcommand, &cli, &config).await,
         Command::Devices { .. } => handle_devices_command(&cli, &config).await,
         Command::Analyze { trace } => {
             let result = handlers::performance::handle_analyze(&trace)?;
@@ -268,6 +269,101 @@ async fn handle_config_command(subcommand: ConfigCommand, cli: &Cli) -> Result<(
         ConfigCommand::Path => {
             let result = handlers::config_handler::handle_config_path()?;
             output::print_output(&result, cli.json, true)
+        }
+    }
+}
+
+async fn handle_auth_command(subcommand: AuthCommand, cli: &Cli, config: &Config) -> Result<()> {
+    let socket_path = get_socket_path(config);
+
+    if !is_daemon_running(&socket_path) {
+        eprintln!("Starting daemon...");
+        start_daemon_background()?;
+        tokio::time::sleep(std::time::Duration::from_secs(secs::DAEMON_STARTUP)).await;
+
+        if !is_daemon_running(&socket_path) {
+            return Err(ChromeError::Connection("Failed to start daemon".into()));
+        }
+    }
+
+    let mut client = DaemonClient::connect(&socket_path).await?;
+    let session_id = if cli.user_profile {
+        let headless = cli.headless.unwrap_or(false);
+        client.get_or_create_user_profile_session(headless).await?
+    } else if let Some(ref sid) = cli.session {
+        sid.clone()
+    } else {
+        return Err(ChromeError::General(
+            "Session required. Use --user-profile or --session".into(),
+        ));
+    };
+
+    match subcommand {
+        AuthCommand::Export { output } => {
+            let result = daemon_request(
+                &mut client,
+                "auth.export",
+                &session_id,
+                json!({ "output": output.as_ref().map(|p| p.display().to_string()) }),
+            )
+            .await?;
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                let cookies = result
+                    .get("cookies_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let origins = result
+                    .get("origins_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                println!(
+                    "{}",
+                    output::text::success(&format!(
+                        "Exported {} cookies, {} origins",
+                        cookies, origins
+                    ))
+                );
+                if let Some(path) = output {
+                    println!(
+                        "{}",
+                        output::text::key_value("Output", &path.display().to_string())
+                    );
+                }
+            }
+            Ok(())
+        }
+        AuthCommand::Import { input } => {
+            let result = daemon_request(
+                &mut client,
+                "auth.import",
+                &session_id,
+                json!({ "input": input.display().to_string() }),
+            )
+            .await?;
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                let cookies = result
+                    .get("cookies_imported")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let origins = result
+                    .get("origins_imported")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                println!(
+                    "{}",
+                    output::text::success(&format!(
+                        "Imported {} cookies, {} origins",
+                        cookies, origins
+                    ))
+                );
+            }
+            Ok(())
         }
     }
 }
@@ -1215,7 +1311,8 @@ async fn handle_via_daemon(
         | Command::Config { .. }
         | Command::History { .. }
         | Command::Session { .. }
-        | Command::Server { .. } => {
+        | Command::Server { .. }
+        | Command::Auth { .. } => {
             unreachable!("These commands are handled separately in dispatch()")
         }
     }

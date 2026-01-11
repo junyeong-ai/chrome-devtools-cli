@@ -1,4 +1,5 @@
 pub mod a11y;
+pub mod auth;
 pub mod config_handler;
 pub mod console;
 pub mod dialog;
