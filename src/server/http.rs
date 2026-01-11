@@ -2,13 +2,19 @@ use crate::chrome::collectors::{ExtensionEvent, RecordingMarker, TraceStatus};
 use crate::chrome::storage::SessionStorage;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{
+        State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     http::StatusCode,
-    routing::{get, post},
+    response::IntoResponse,
+    routing::{any, get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
@@ -19,6 +25,28 @@ pub const DEFAULT_HTTP_PORT: u16 = 9223;
 #[derive(Clone)]
 struct AppState {
     session_pool: Arc<SessionPool>,
+    event_tx: broadcast::Sender<WsMessage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WsMessage {
+    Event {
+        session_id: String,
+        event: ExtensionEvent,
+    },
+    Recording {
+        session_id: String,
+        action: String,
+        recording_id: String,
+    },
+    Trace {
+        session_id: String,
+        action: String,
+        trace_id: String,
+    },
+    Ping,
+    Pong,
 }
 
 #[derive(Serialize)]
@@ -158,16 +186,27 @@ struct TraceStatusRequest {
 pub struct HttpServer {
     port: u16,
     session_pool: Arc<SessionPool>,
+    event_tx: broadcast::Sender<WsMessage>,
 }
 
 impl HttpServer {
     pub fn new(port: u16, session_pool: Arc<SessionPool>) -> Self {
-        Self { port, session_pool }
+        let (event_tx, _) = broadcast::channel(1024);
+        Self {
+            port,
+            session_pool,
+            event_tx,
+        }
+    }
+
+    pub fn event_sender(&self) -> broadcast::Sender<WsMessage> {
+        self.event_tx.clone()
     }
 
     pub async fn run(&self) -> crate::Result<()> {
         let state = AppState {
             session_pool: self.session_pool.clone(),
+            event_tx: self.event_tx.clone(),
         };
 
         let cors = CorsLayer::new()
@@ -186,13 +225,14 @@ impl HttpServer {
             .route("/api/trace/start", post(start_trace))
             .route("/api/trace/stop", post(stop_trace))
             .route("/api/trace/status", post(trace_status))
+            .route("/ws", any(ws_handler))
             .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
             .layer(cors)
             .with_state(state);
 
         let addr = format!("127.0.0.1:{}", self.port);
         let listener = tokio::net::TcpListener::bind(&addr).await?;
-        tracing::info!("HTTP server listening on {}", addr);
+        tracing::info!("HTTP server listening on {} (WebSocket: /ws)", addr);
 
         axum::serve(listener, app).await?;
         Ok(())
@@ -552,4 +592,67 @@ async fn trace_status(
 
     let status = session.collectors().trace.status().await;
     (StatusCode::OK, Json(ApiResponse::with_trace_status(status)))
+}
+
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_websocket(socket, state))
+}
+
+async fn handle_websocket(socket: WebSocket, state: AppState) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut event_rx = state.event_tx.subscribe();
+    let (pong_tx, mut pong_rx) = tokio::sync::mpsc::channel::<()>(8);
+
+    let send_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                msg = event_rx.recv() => {
+                    match msg {
+                        Ok(ws_msg) => {
+                            if let Ok(json) = serde_json::to_string(&ws_msg)
+                                && sender.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                _ = pong_rx.recv() => {
+                    let pong = serde_json::to_string(&WsMessage::Pong).unwrap_or_default();
+                    if sender.send(Message::Text(pong.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = receiver.next().await {
+            match msg {
+                Message::Text(text) => {
+                    if let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) {
+                        match ws_msg {
+                            WsMessage::Event { session_id, event } => {
+                                if let Ok(storage) = SessionStorage::from_session_id(&session_id) {
+                                    let _ = storage.append("extension", &event);
+                                }
+                            }
+                            WsMessage::Ping => {
+                                let _ = pong_tx.send(()).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = send_task => {}
+        _ = recv_task => {}
+    }
 }
