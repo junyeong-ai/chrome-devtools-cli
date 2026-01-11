@@ -1,5 +1,6 @@
 pub mod action_executor;
 pub mod collectors;
+pub mod event_store;
 pub mod models;
 pub mod recording;
 pub mod session_manager;

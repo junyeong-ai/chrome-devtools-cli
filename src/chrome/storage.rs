@@ -1,13 +1,15 @@
 use crate::Result;
+use crate::chrome::event_store::{EventMetadata, EventStore};
 use crate::chrome::recording::{Recording, RecordingStorage, list_recordings};
 use serde::{Serialize, de::DeserializeOwned};
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub struct SessionStorage {
     session_id: String,
     base_dir: PathBuf,
+    event_store: Arc<EventStore>,
 }
 
 impl SessionStorage {
@@ -15,9 +17,13 @@ impl SessionStorage {
         let base_dir = Self::sessions_dir()?.join(session_id);
         fs::create_dir_all(&base_dir)?;
 
+        let db_path = base_dir.join("events.db");
+        let event_store = Arc::new(EventStore::open(&db_path)?);
+
         Ok(Self {
             session_id: session_id.to_string(),
             base_dir,
+            event_store,
         })
     }
 
@@ -27,9 +33,13 @@ impl SessionStorage {
             fs::create_dir_all(&base_dir)?;
         }
 
+        let db_path = base_dir.join("events.db");
+        let event_store = Arc::new(EventStore::open(&db_path)?);
+
         Ok(Self {
             session_id: session_id.to_string(),
             base_dir,
+            event_store,
         })
     }
 
@@ -47,47 +57,44 @@ impl SessionStorage {
         Ok(dir)
     }
 
-    pub fn append<T: Serialize>(&self, collection: &str, item: &T) -> Result<()> {
-        let path = self.base_dir.join(format!("{}.ndjson", collection));
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+    pub fn append<T: Serialize + EventMetadata>(&self, collection: &str, item: &T) -> Result<()> {
+        self.event_store.append(collection, item)?;
+        Ok(())
+    }
 
-        let mut writer = BufWriter::new(file);
-        serde_json::to_writer(&mut writer, item)?;
-        writeln!(writer)?;
+    pub fn append_raw<T: Serialize>(&self, collection: &str, item: &T) -> Result<()> {
+        self.event_store.append_raw(collection, item)?;
         Ok(())
     }
 
     pub fn read_all<T: DeserializeOwned>(&self, collection: &str) -> Result<Vec<T>> {
-        let path = self.base_dir.join(format!("{}.ndjson", collection));
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
+        self.event_store.read_all(collection)
+    }
 
-        let file = File::open(&path)?;
-        let reader = BufReader::new(file);
-        let mut items = Vec::new();
-
-        for line in reader.lines() {
-            let line = line?;
-            if !line.is_empty()
-                && let Ok(item) = serde_json::from_str(&line)
-            {
-                items.push(item);
-            }
-        }
-
-        Ok(items)
+    pub fn query_range<T: DeserializeOwned>(
+        &self,
+        collection: &str,
+        start_ms: Option<u64>,
+        end_ms: Option<u64>,
+        event_type: Option<&str>,
+    ) -> Result<Vec<T>> {
+        self.event_store
+            .query_range(collection, start_ms, end_ms, event_type)
     }
 
     pub fn count(&self, collection: &str) -> usize {
-        let path = self.base_dir.join(format!("{}.ndjson", collection));
-        if !path.exists() {
-            return 0;
-        }
+        self.event_store.count(collection)
+    }
 
-        File::open(&path)
-            .map(|f| BufReader::new(f).lines().count())
-            .unwrap_or(0)
+    pub fn count_by_type(&self, collection: &str, event_type: &str) -> usize {
+        self.event_store.count_by_type(collection, event_type)
+    }
+
+    pub fn count_collections(
+        &self,
+        collections: &[&str],
+    ) -> std::collections::HashMap<String, usize> {
+        self.event_store.count_collections(collections)
     }
 
     pub fn screenshots_dir(&self) -> Result<PathBuf> {
@@ -210,15 +217,28 @@ mod tests {
         name: String,
     }
 
+    impl EventMetadata for TestItem {
+        fn event_type(&self) -> &'static str {
+            "test"
+        }
+        fn timestamp_ms(&self) -> Option<u64> {
+            Some(self.id as u64 * 100)
+        }
+    }
+
     fn create_test_storage() -> (SessionStorage, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let session_id = "test-session";
         let base_dir = temp_dir.path().join(session_id);
         fs::create_dir_all(&base_dir).unwrap();
 
+        let db_path = base_dir.join("events.db");
+        let event_store = Arc::new(EventStore::open(&db_path).unwrap());
+
         let storage = SessionStorage {
             session_id: session_id.to_string(),
             base_dir,
+            event_store,
         };
         (storage, temp_dir)
     }
