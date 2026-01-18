@@ -1,6 +1,6 @@
 # Chrome DevTools CLI
 
-[![Rust](https://img.shields.io/badge/rust-1.91.1%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.92.0%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Fchrome--devtools--cli-blue.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/junyeong-ai/chrome-devtools-cli)
 
 > **English** | **[한국어](README.md)**
@@ -12,8 +12,8 @@
 ## Why Chrome DevTools CLI?
 
 - **Fast** — Daemon architecture reuses browser connections, millisecond command execution
-- **Complete** — 30+ commands cover all Chrome features
-- **Automation** — JSON output, event capture, Playwright script generation
+- **Complete** — 45+ commands cover all Chrome features
+- **AI-Optimized** — ref_id-based element access, JSON output, Playwright script generation
 
 ---
 
@@ -37,11 +37,27 @@ chrome-devtools-cli click "#button"
 ### Browser Automation
 ```bash
 chrome-devtools-cli navigate "https://example.com"    # Navigate
-chrome-devtools-cli click "#login"                    # Click element
-chrome-devtools-cli fill "#email" "user@test.com"     # Fill input field
-chrome-devtools-cli type "#search" "query" --delay 50 # Type with delay
+chrome-devtools-cli click --selector "#login"         # Click element
+chrome-devtools-cli fill "user@test.com" -s "#email"  # Fill input field
+chrome-devtools-cli type "query" -s "#search" --delay 50  # Type with delay
 chrome-devtools-cli press Enter                       # Key press
-chrome-devtools-cli select "#dropdown" --label "Option"  # Dropdown select
+chrome-devtools-cli select --selector "#dropdown" --label "Option"  # Dropdown
+```
+
+### AI Agent Optimization
+```bash
+# Explore page elements (with ref_id)
+chrome-devtools-cli describe --interactable
+# Output: [i0] <button> "Login" → #login-btn
+#         [f1] <input> "Email" → #email
+
+# Access elements directly via ref_id
+chrome-devtools-cli click --ref i0               # interactive element 0
+chrome-devtools-cli fill "test@email.com" --ref f1  # form element 1
+chrome-devtools-cli hover --ref n2               # navigation element 2
+
+# Vision AI labeling
+chrome-devtools-cli label -o labeled.png         # Overlay numbers on screenshot
 ```
 
 ### Screenshots & PDF
@@ -104,7 +120,7 @@ cargo build --release
 cp target/release/chrome-devtools-cli ~/.local/bin/
 ```
 
-**Requirements**: Rust 1.91.1+
+**Requirements**: Rust 1.92.0+
 
 ---
 
@@ -158,15 +174,22 @@ chrome-devtools-cli config edit    # Edit in editor
 ### Interaction
 | Command | Description |
 |---------|-------------|
-| `click <selector>` | Click element |
-| `hover <selector>` | Hover element |
-| `fill <selector> <text>` | Fill input field |
-| `type <selector> <text>` | Type with delay |
+| `click [--selector <sel>] [--ref <ref>]` | Click element |
+| `hover [--selector <sel>] [--ref <ref>]` | Hover element |
+| `fill <text> [--selector <sel>] [--ref <ref>]` | Fill input field |
+| `type <text> [--selector <sel>] [--ref <ref>]` | Type with delay |
 | `press <key>` | Press key |
-| `scroll <selector>` | Scroll to element |
-| `select <selector>` | Select dropdown |
+| `scroll [--selector <sel>] [--ref <ref>]` | Scroll to element |
+| `select [--selector <sel>] [--ref <ref>]` | Select dropdown |
 | `dialog` | Handle JavaScript dialog |
 | `wait <selector>` | Wait for condition |
+
+### AI Agent
+| Command | Description |
+|---------|-------------|
+| `describe [-i] [-f] [-n]` | Explore elements (with ref_id) |
+| `label [-o <path>]` | Vision AI label overlay |
+| `a11y [--interactable]` | Accessibility tree |
 
 ### Capture & Analysis
 | Command | Description |
@@ -182,7 +205,6 @@ chrome-devtools-cli config edit    # Edit in editor
 | `query <selector>` | Query elements |
 | `inspect <selector>` | Inspect element properties |
 | `dom` | Get DOM tree structure |
-| `a11y` | Get accessibility tree |
 | `listeners` | Get event listeners |
 | `html` | Get page HTML |
 | `eval <expr>` | Execute JavaScript |
@@ -222,6 +244,7 @@ chrome-devtools-cli config edit    # Edit in editor
 - `--user-profile` — Persist user profile session
 - `--headless=false` — Show browser window
 - `--last <duration>` — Time filter (e.g., 10m, 2h)
+- `--ref <ref>` — Access element via ref_id from describe
 
 ---
 

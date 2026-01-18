@@ -1,6 +1,6 @@
 # Chrome DevTools CLI
 
-[![Rust](https://img.shields.io/badge/rust-1.91.1%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.92.0%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Fchrome--devtools--cli-blue.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/junyeong-ai/chrome-devtools-cli)
 
 > **[English](README.en.md)** | **한국어**
@@ -12,8 +12,8 @@
 ## 왜 Chrome DevTools CLI인가?
 
 - **빠름** — 데몬 아키텍처로 브라우저 연결 재사용, 밀리초 단위 명령 실행
-- **완전함** — 30+ 명령어로 Chrome 전체 기능 커버
-- **자동화** — JSON 출력, 이벤트 캡처, Playwright 스크립트 생성
+- **완전함** — 45+ 명령어로 Chrome 전체 기능 커버
+- **AI 최적화** — ref_id 기반 요소 접근, JSON 출력, Playwright 스크립트 생성
 
 ---
 
@@ -37,11 +37,27 @@ chrome-devtools-cli click "#button"
 ### 브라우저 자동화
 ```bash
 chrome-devtools-cli navigate "https://example.com"    # 페이지 이동
-chrome-devtools-cli click "#login"                    # 요소 클릭
-chrome-devtools-cli fill "#email" "user@test.com"     # 입력 필드 채우기
-chrome-devtools-cli type "#search" "검색어" --delay 50  # 타이핑
+chrome-devtools-cli click --selector "#login"         # 요소 클릭
+chrome-devtools-cli fill "user@test.com" -s "#email"  # 입력 필드 채우기
+chrome-devtools-cli type "검색어" -s "#search" --delay 50  # 타이핑
 chrome-devtools-cli press Enter                       # 키 입력
-chrome-devtools-cli select "#dropdown" --label "옵션" # 드롭다운 선택
+chrome-devtools-cli select --selector "#dropdown" --label "옵션"  # 드롭다운
+```
+
+### AI 에이전트 최적화
+```bash
+# 페이지 요소 탐색 (ref_id 포함)
+chrome-devtools-cli describe --interactable
+# 출력: [i0] <button> "로그인" → #login-btn
+#       [f1] <input> "이메일" → #email
+
+# ref_id로 직접 요소 접근
+chrome-devtools-cli click --ref i0               # interactive element 0
+chrome-devtools-cli fill "test@email.com" --ref f1  # form element 1
+chrome-devtools-cli hover --ref n2               # navigation element 2
+
+# Vision AI용 라벨링
+chrome-devtools-cli label -o labeled.png         # 스크린샷에 번호 오버레이
 ```
 
 ### 스크린샷 & PDF
@@ -104,7 +120,7 @@ cargo build --release
 cp target/release/chrome-devtools-cli ~/.local/bin/
 ```
 
-**요구사항**: Rust 1.91.1+
+**요구사항**: Rust 1.92.0+
 
 ---
 
@@ -158,15 +174,22 @@ chrome-devtools-cli config edit    # 에디터로 편집
 ### 인터랙션
 | 명령어 | 설명 |
 |--------|------|
-| `click <selector>` | 요소 클릭 |
-| `hover <selector>` | 요소 호버 |
-| `fill <selector> <text>` | 입력 필드 채우기 |
-| `type <selector> <text>` | 타이핑 (딜레이) |
+| `click [--selector <sel>] [--ref <ref>]` | 요소 클릭 |
+| `hover [--selector <sel>] [--ref <ref>]` | 요소 호버 |
+| `fill <text> [--selector <sel>] [--ref <ref>]` | 입력 필드 채우기 |
+| `type <text> [--selector <sel>] [--ref <ref>]` | 타이핑 (딜레이) |
 | `press <key>` | 키 입력 |
-| `scroll <selector>` | 요소로 스크롤 |
-| `select <selector>` | 드롭다운 선택 |
+| `scroll [--selector <sel>] [--ref <ref>]` | 요소로 스크롤 |
+| `select [--selector <sel>] [--ref <ref>]` | 드롭다운 선택 |
 | `dialog` | JavaScript 다이얼로그 처리 |
 | `wait <selector>` | 조건 대기 |
+
+### AI 에이전트
+| 명령어 | 설명 |
+|--------|------|
+| `describe [-i] [-f] [-n]` | 요소 탐색 (ref_id 포함) |
+| `label [-o <path>]` | Vision AI용 라벨 오버레이 |
+| `a11y [--interactable]` | 접근성 트리 |
 
 ### 캡처 & 분석
 | 명령어 | 설명 |
@@ -182,7 +205,6 @@ chrome-devtools-cli config edit    # 에디터로 편집
 | `query <selector>` | 요소 검색 |
 | `inspect <selector>` | 요소 속성 검사 |
 | `dom` | DOM 트리 구조 |
-| `a11y` | 접근성 트리 |
 | `listeners` | 이벤트 리스너 조회 |
 | `html` | 페이지 HTML |
 | `eval <expr>` | JavaScript 실행 |
@@ -222,6 +244,7 @@ chrome-devtools-cli config edit    # 에디터로 편집
 - `--user-profile` — 사용자 프로필 세션 유지
 - `--headless=false` — 브라우저 창 표시
 - `--last <duration>` — 시간 필터 (예: 10m, 2h)
+- `--ref <ref>` — describe 결과의 ref_id로 요소 접근
 
 ---
 
