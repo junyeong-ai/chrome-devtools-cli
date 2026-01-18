@@ -19,8 +19,38 @@ pub struct A11yNode {
     pub value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<A11yAttributes>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<A11yNode>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct A11yAttributes {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expanded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
 }
 
 impl output::OutputFormatter for A11yResult {
@@ -52,7 +82,7 @@ fn format_a11y_node(node: &A11yNode, depth: usize, output: &mut Vec<String>) {
     let mut line = format!("{}{}", indent, node.role);
 
     if let Some(ref name) = node.name {
-        line.push_str(&format!(": \"{}\"", truncate(name, 40)));
+        line.push_str(&format!(": \"{}\"", output::text::truncate(name, 40)));
     }
 
     if node.focusable {
@@ -60,7 +90,7 @@ fn format_a11y_node(node: &A11yNode, depth: usize, output: &mut Vec<String>) {
     }
 
     if let Some(ref value) = node.value {
-        line.push_str(&format!(" (value: {})", truncate(value, 20)));
+        line.push_str(&format!(" (value: {})", output::text::truncate(value, 20)));
     }
 
     output.push(line);
@@ -70,10 +100,6 @@ fn format_a11y_node(node: &A11yNode, depth: usize, output: &mut Vec<String>) {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    crate::output::text::truncate(s, max + 3)
-}
-
 #[derive(Deserialize)]
 struct JsA11yNode {
     role: String,
@@ -81,6 +107,7 @@ struct JsA11yNode {
     focusable: bool,
     value: Option<String>,
     description: Option<String>,
+    attributes: Option<A11yAttributes>,
     children: Vec<JsA11yNode>,
 }
 
@@ -89,6 +116,7 @@ pub async fn handle_a11y(
     selector: Option<&str>,
     depth: u32,
     interactable_only: bool,
+    verbose: bool,
 ) -> Result<A11yResult> {
     let page = provider.get_or_create_page().await?;
 
@@ -109,14 +137,42 @@ pub async fn handle_a11y(
 
     let script = format!(
         r#"(function(){{
-            const interactiveRoles = {};
+            const interactiveRoles = {interactive_roles};
+            const includeAttrs = {verbose};
+            function parseBool(v) {{ return v === 'true' ? true : v === 'false' ? false : null; }}
+            function getAttributes(el) {{
+                if (!includeAttrs) return null;
+                const attrs = {{}};
+                const pressed = el.getAttribute('aria-pressed');
+                if (pressed) attrs.pressed = parseBool(pressed);
+                const checked = el.getAttribute('aria-checked') || (el.checked ? 'true' : null);
+                if (checked) attrs.checked = parseBool(checked);
+                const selected = el.getAttribute('aria-selected') || (el.selected ? 'true' : null);
+                if (selected) attrs.selected = parseBool(selected);
+                const expanded = el.getAttribute('aria-expanded');
+                if (expanded) attrs.expanded = parseBool(expanded);
+                if (el.disabled || el.getAttribute('aria-disabled') === 'true') attrs.disabled = true;
+                if (el.getAttribute('aria-hidden') === 'true') attrs.hidden = true;
+                if (el.required || el.getAttribute('aria-required') === 'true') attrs.required = true;
+                const invalid = el.getAttribute('aria-invalid');
+                if (invalid === 'true') attrs.invalid = true;
+                if (el.readOnly || el.getAttribute('aria-readonly') === 'true') attrs.readonly = true;
+                const level = el.getAttribute('aria-level') || (el.tagName.match(/^H(\d)$/i)?.[1]);
+                if (level) attrs.level = parseInt(level, 10);
+                const live = el.getAttribute('aria-live');
+                if (live) attrs.live = live;
+                const placeholder = el.getAttribute('placeholder');
+                if (placeholder) attrs.placeholder = placeholder;
+                return Object.keys(attrs).length > 0 ? attrs : null;
+            }}
             function getA11yProps(el) {{
                 const role = el.getAttribute('role') || getImplicitRole(el);
                 const name = el.getAttribute('aria-label') || el.getAttribute('alt') || el.textContent?.trim()?.substring(0, 100) || null;
                 const focusable = el.tabIndex >= 0 || ['A','BUTTON','INPUT','SELECT','TEXTAREA'].includes(el.tagName);
                 const value = el.value || el.getAttribute('aria-valuenow') || null;
                 const description = el.getAttribute('aria-description') || null;
-                return {{ role, name, focusable, value, description }};
+                const attributes = getAttributes(el);
+                return {{ role, name, focusable, value, description, attributes }};
             }}
             function getImplicitRole(el) {{
                 const tag = el.tagName?.toLowerCase();
@@ -169,11 +225,14 @@ pub async fn handle_a11y(
                 }}
                 return [{{ ...props, children }}];
             }}
-            const root = {};
+            const root = {selector_code};
             if (!root) return null;
-            return traverse(root, 0, {});
+            return traverse(root, 0, {depth});
         }})()"#,
-        interactive_roles, selector_code, depth
+        interactive_roles = interactive_roles,
+        verbose = verbose,
+        selector_code = selector_code,
+        depth = depth
     );
 
     let result = page
@@ -204,6 +263,7 @@ fn convert_a11y_node(node: JsA11yNode) -> A11yNode {
         focusable: node.focusable,
         value: node.value,
         description: node.description,
+        attributes: node.attributes,
         children: node.children.into_iter().map(convert_a11y_node).collect(),
     }
 }
@@ -214,12 +274,6 @@ mod tests {
     use crate::output::OutputFormatter;
 
     #[test]
-    fn test_truncate() {
-        assert_eq!(truncate("short", 10), "short");
-        assert_eq!(truncate("a long string", 5), "a lon...");
-    }
-
-    #[test]
     fn test_a11y_node_serialization() {
         let node = A11yNode {
             role: "button".to_string(),
@@ -227,6 +281,7 @@ mod tests {
             focusable: true,
             value: None,
             description: None,
+            attributes: None,
             children: vec![],
         };
         let json = serde_json::to_string(&node).unwrap();
@@ -242,6 +297,7 @@ mod tests {
             focusable: true,
             value: Some("50".to_string()),
             description: Some("Adjust volume level".to_string()),
+            attributes: None,
             children: vec![],
         };
         let json = serde_json::to_string(&node).unwrap();
@@ -259,12 +315,14 @@ mod tests {
                 focusable: false,
                 value: None,
                 description: None,
+                attributes: None,
                 children: vec![A11yNode {
                     role: "textbox".to_string(),
                     name: Some("Email".to_string()),
                     focusable: true,
                     value: None,
                     description: None,
+                    attributes: None,
                     children: vec![],
                 }],
             }],
@@ -285,6 +343,7 @@ mod tests {
                 focusable: false,
                 value: None,
                 description: None,
+                attributes: None,
                 children: vec![],
             }],
         };
@@ -302,6 +361,7 @@ mod tests {
                 focusable: false,
                 value: None,
                 description: None,
+                attributes: None,
                 children: vec![],
             }],
         };
@@ -318,6 +378,7 @@ mod tests {
             focusable: true,
             value: None,
             description: None,
+            attributes: None,
             children: vec![],
         };
         let non_focusable = A11yNode {
@@ -326,6 +387,7 @@ mod tests {
             focusable: false,
             value: None,
             description: None,
+            attributes: None,
             children: vec![],
         };
 
@@ -334,5 +396,25 @@ mod tests {
 
         assert!(json1.contains("\"focusable\":true"));
         assert!(!json2.contains("focusable"));
+    }
+
+    #[test]
+    fn test_a11y_attributes() {
+        let node = A11yNode {
+            role: "checkbox".to_string(),
+            name: Some("Accept terms".to_string()),
+            focusable: true,
+            value: None,
+            description: None,
+            attributes: Some(A11yAttributes {
+                checked: Some(true),
+                required: Some(true),
+                ..Default::default()
+            }),
+            children: vec![],
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(json.contains("\"checked\":true"));
+        assert!(json.contains("\"required\":true"));
     }
 }

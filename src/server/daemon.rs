@@ -3,6 +3,8 @@ use crate::config::Config;
 use crate::handlers;
 use crate::handlers::input::InteractionMode;
 use crate::server::adapter::{ToResponse, opt_bool, opt_str, opt_u64};
+use crate::{ChromeError, chrome::PageProvider, js_templates};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,6 +15,39 @@ use super::http::{DEFAULT_HTTP_PORT, HttpServer};
 use super::ipc::{ClientId, IpcServer};
 use super::protocol::{Request, Response, error_codes};
 use super::session_pool::SessionPool;
+
+#[derive(Deserialize)]
+struct RefResolution {
+    found: bool,
+    selector: Option<String>,
+    #[allow(dead_code)]
+    error: Option<String>,
+}
+
+async fn resolve_ref_to_selector(provider: &impl PageProvider, ref_id: &str) -> Result<String> {
+    let page = provider.get_or_create_page().await?;
+    let script = js_templates::resolve_ref(ref_id);
+    let result = page
+        .evaluate(script)
+        .await
+        .map_err(|e| ChromeError::EvaluationError(e.to_string()))?;
+
+    let resolution: Option<RefResolution> = result.into_value().unwrap_or(None);
+    match resolution {
+        Some(r) if r.found => r.selector.ok_or_else(|| {
+            ChromeError::General(format!("Ref '{}' found but no selector generated", ref_id))
+        }),
+        Some(r) => {
+            Err(ChromeError::General(r.error.unwrap_or_else(|| {
+                format!("Element with ref '{}' not found", ref_id)
+            })))
+        }
+        None => Err(ChromeError::General(format!(
+            "Invalid ref format: {}",
+            ref_id
+        ))),
+    }
+}
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/cdtcli.sock";
 
@@ -231,6 +266,27 @@ async fn handle_request(
         };
     }
 
+    macro_rules! resolve_selector {
+        ($session:expr) => {{
+            match (opt_str!(params, "selector"), opt_str!(params, "ref")) {
+                (Some(s), _) if !s.is_empty() => s.to_string(),
+                (_, Some(r)) => match resolve_ref_to_selector($session.as_ref(), r).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Response::error(id, error_codes::INVALID_PARAMS, e.to_string());
+                    }
+                },
+                _ => {
+                    return Response::error(
+                        id,
+                        error_codes::INVALID_PARAMS,
+                        "selector or ref required",
+                    );
+                }
+            }
+        }};
+    }
+
     match request.method.as_str() {
         // === Session Management ===
         "session.create" => {
@@ -335,44 +391,44 @@ async fn handle_request(
         // === Input (delegated to handlers) ===
         "click" => {
             let session = get_session!();
-            let selector = require_str!("selector");
+            let selector = resolve_selector!(session);
             let mode = opt_str!(params, "mode")
                 .and_then(|m| m.parse().ok())
                 .unwrap_or(InteractionMode::Auto);
-            handlers::input::handle_click(session.as_ref(), selector, mode)
+            handlers::input::handle_click(session.as_ref(), &selector, mode)
                 .await
                 .to_response(id)
         }
 
         "fill" => {
             let session = get_session!();
-            let selector = require_str!("selector");
+            let selector = resolve_selector!(session);
             let text = require_str!("text");
             let mode = opt_str!(params, "mode")
                 .and_then(|m| m.parse().ok())
                 .unwrap_or(InteractionMode::Auto);
-            handlers::input::handle_fill(session.as_ref(), selector, text, mode)
+            handlers::input::handle_fill(session.as_ref(), &selector, text, mode)
                 .await
                 .to_response(id)
         }
 
         "type" => {
             let session = get_session!();
-            let selector = require_str!("selector");
+            let selector = resolve_selector!(session);
             let text = require_str!("text");
             let delay = params.get("delay").and_then(|v| v.as_u64());
             let mode = opt_str!(params, "mode")
                 .and_then(|m| m.parse().ok())
                 .unwrap_or(InteractionMode::Auto);
-            handlers::input::handle_type(session.as_ref(), selector, text, delay, mode)
+            handlers::input::handle_type(session.as_ref(), &selector, text, delay, mode)
                 .await
                 .to_response(id)
         }
 
         "hover" => {
             let session = get_session!();
-            let selector = require_str!("selector");
-            handlers::input::handle_hover(session.as_ref(), selector)
+            let selector = resolve_selector!(session);
+            handlers::input::handle_hover(session.as_ref(), &selector)
                 .await
                 .to_response(id)
         }
@@ -437,7 +493,33 @@ async fn handle_request(
             let selector = opt_str!(params, "selector");
             let depth = opt_u64!(params, "depth", 5) as u32;
             let interactable = opt_bool!(params, "interactable", false);
-            handlers::a11y::handle_a11y(session.as_ref(), selector, depth, interactable)
+            let verbose = opt_bool!(params, "verbose", false);
+            handlers::a11y::handle_a11y(session.as_ref(), selector, depth, interactable, verbose)
+                .await
+                .to_response(id)
+        }
+
+        "describe" => {
+            let session = get_session!();
+            let options = handlers::describe::DescribeOptions {
+                selector: opt_str!(params, "selector"),
+                interactable: opt_bool!(params, "interactable", false),
+                forms: opt_bool!(params, "forms", false),
+                navigation: opt_bool!(params, "navigation", false),
+                limit: opt_u64!(params, "limit", 100) as usize,
+                with_bounds: opt_bool!(params, "with_bounds", false),
+                with_selectors: opt_bool!(params, "with_selectors", false),
+            };
+            handlers::describe::handle_describe(session.as_ref(), options)
+                .await
+                .to_response(id)
+        }
+
+        "label" => {
+            let session = get_session!();
+            let selector = opt_str!(params, "selector");
+            let output = opt_str!(params, "output").map(std::path::Path::new);
+            handlers::label::handle_label(session.as_ref(), output, selector)
                 .await
                 .to_response(id)
         }
@@ -445,24 +527,24 @@ async fn handle_request(
         // === Extras (delegated to handlers) ===
         "scroll" => {
             let session = get_session!();
-            let selector = require_str!("selector");
+            let selector = resolve_selector!(session);
             let behavior = opt_str!(params, "behavior").unwrap_or("smooth");
             let block = opt_str!(params, "block").unwrap_or("center");
-            handlers::extras::handle_scroll(session.as_ref(), selector, behavior, block)
+            handlers::extras::handle_scroll(session.as_ref(), &selector, behavior, block)
                 .await
                 .to_response(id)
         }
 
         "select" => {
             let session = get_session!();
-            let selector = require_str!("selector");
+            let selector = resolve_selector!(session);
             let value = opt_str!(params, "value");
             let index = params
                 .get("index")
                 .and_then(|v| v.as_u64())
                 .map(|i| i as usize);
             let label = opt_str!(params, "label");
-            handlers::extras::handle_select(session.as_ref(), selector, value, index, label)
+            handlers::extras::handle_select(session.as_ref(), &selector, value, index, label)
                 .await
                 .to_response(id)
         }

@@ -85,7 +85,7 @@ impl output::OutputFormatter for InspectResult {
                 let label = child
                     .text
                     .as_ref()
-                    .map(|t| format!("<{}> \"{}\"", child.tag, truncate(t, 30)))
+                    .map(|t| format!("<{}> \"{}\"", child.tag, output::text::truncate(t, 30)))
                     .unwrap_or_else(|| format!("<{}>", child.tag));
                 output.push(format!("  {}", label));
             }
@@ -97,10 +97,6 @@ impl output::OutputFormatter for InspectResult {
     fn format_json(&self, pretty: bool) -> Result<String> {
         output::to_json(self, pretty)
     }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    crate::output::text::truncate(s, max + 3)
 }
 
 #[derive(Debug, Serialize)]
@@ -152,7 +148,7 @@ impl output::OutputFormatter for ListenersResult {
                 };
                 output.push(format!("  {}{}", listener.event_type, flag_str));
                 if let Some(ref h) = listener.handler {
-                    output.push(format!("    {}", truncate(h, 60)));
+                    output.push(format!("    {}", output::text::truncate(h, 60)));
                 }
             }
         }
@@ -203,7 +199,7 @@ impl output::OutputFormatter for QueryResult {
                     desc.push_str(&format!(" .{}", class.replace(' ', ".")));
                 }
                 if let Some(ref t) = el.text {
-                    desc.push_str(&format!(" \"{}\"", truncate(t, 20)));
+                    desc.push_str(&format!(" \"{}\"", output::text::truncate(t, 20)));
                 }
                 output.push(format!("  {}", desc));
             }
@@ -264,7 +260,7 @@ fn format_dom_node(node: &DomNode, depth: usize, output: &mut Vec<String>) {
         ));
     }
     if let Some(ref t) = node.text {
-        line.push_str(&format!(" \"{}\"", truncate(t, 20)));
+        line.push_str(&format!(" \"{}\"", output::text::truncate(t, 20)));
     }
     output.push(line);
 
@@ -625,12 +621,6 @@ fn convert_dom_node(node: JsDomNode) -> DomNode {
 mod tests {
     use super::*;
     use crate::output::OutputFormatter;
-
-    #[test]
-    fn test_truncate() {
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello world", 5), "hello...");
-    }
 
     #[test]
     fn test_inspect_result_format_text() {

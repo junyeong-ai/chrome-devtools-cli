@@ -81,11 +81,11 @@ pub mod text {
             .join(" ")
     }
 
-    pub fn truncate(s: &str, max_len: usize) -> String {
-        if s.len() <= max_len {
+    pub fn truncate(s: &str, visible_chars: usize) -> String {
+        if s.len() <= visible_chars {
             s.to_string()
         } else {
-            format!("{}...", &s[..max_len - 3])
+            format!("{}...", &s[..visible_chars])
         }
     }
 
@@ -173,8 +173,8 @@ mod tests {
 
     #[test]
     fn test_truncate_long_string() {
-        let result = text::truncate("hello world this is a long string", 15);
-        assert_eq!(result.len(), 15);
+        let result = text::truncate("hello world this is a long string", 12);
+        assert_eq!(result, "hello world ...");
         assert!(result.ends_with("..."));
     }
 
