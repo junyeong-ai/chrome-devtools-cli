@@ -49,34 +49,42 @@ pub enum Command {
 
     #[command(about = "Click element")]
     Click {
-        #[arg(help = "CSS selector")]
-        selector: String,
+        #[arg(help = "CSS selector (or use --ref)")]
+        selector: Option<String>,
+        #[arg(long, help = "Element ref from describe (e.g., i0, f1)")]
+        r#ref: Option<String>,
         #[arg(long, default_value = "auto", help = "Mode: auto, cdp, js")]
         mode: String,
     },
 
     #[command(about = "Hover over element")]
     Hover {
-        #[arg(help = "CSS selector")]
-        selector: String,
+        #[arg(help = "CSS selector (or use --ref)")]
+        selector: Option<String>,
+        #[arg(long, help = "Element ref from describe (e.g., i0, f1)")]
+        r#ref: Option<String>,
     },
 
     #[command(about = "Fill input field")]
     Fill {
-        #[arg(help = "CSS selector")]
-        selector: String,
         #[arg(help = "Text to fill")]
         text: String,
+        #[arg(long, short, help = "CSS selector")]
+        selector: Option<String>,
+        #[arg(long, help = "Element ref from describe (e.g., i0, f1)")]
+        r#ref: Option<String>,
         #[arg(long, default_value = "auto", help = "Mode: auto, cdp, js")]
         mode: String,
     },
 
     #[command(about = "Type text with delays")]
     Type {
-        #[arg(help = "CSS selector")]
-        selector: String,
         #[arg(help = "Text to type")]
         text: String,
+        #[arg(long, short, help = "CSS selector")]
+        selector: Option<String>,
+        #[arg(long, help = "Element ref from describe (e.g., i0, f1)")]
+        r#ref: Option<String>,
         #[arg(long, help = "Delay between keystrokes (ms)")]
         delay: Option<u64>,
         #[arg(long, default_value = "auto", help = "Mode: auto, cdp, js")]
@@ -91,8 +99,10 @@ pub enum Command {
 
     #[command(about = "Scroll element into view")]
     Scroll {
-        #[arg(help = "CSS selector")]
-        selector: String,
+        #[arg(help = "CSS selector (or use --ref)")]
+        selector: Option<String>,
+        #[arg(long, help = "Element ref from describe (e.g., i0, f1)")]
+        r#ref: Option<String>,
         #[arg(
             long,
             default_value = "smooth",
@@ -109,8 +119,10 @@ pub enum Command {
 
     #[command(about = "Select option in dropdown")]
     Select {
-        #[arg(help = "CSS selector for select element")]
-        selector: String,
+        #[arg(help = "CSS selector (or use --ref)")]
+        selector: Option<String>,
+        #[arg(long, help = "Element ref from describe (e.g., i0, f1)")]
+        r#ref: Option<String>,
         #[arg(help = "Value to select")]
         value: Option<String>,
         #[arg(long, help = "Select by index (0-based)")]
@@ -171,6 +183,34 @@ pub enum Command {
         depth: u32,
         #[arg(long, short = 'i', help = "Show only interactive elements")]
         interactable: bool,
+        #[arg(long, short = 'v', help = "Include ARIA attributes")]
+        verbose: bool,
+    },
+
+    #[command(about = "Describe visible elements (AI-optimized)")]
+    Describe {
+        #[arg(help = "CSS selector (optional)")]
+        selector: Option<String>,
+        #[arg(long, short = 'i', help = "Show only interactive elements")]
+        interactable: bool,
+        #[arg(long, short = 'f', help = "Show only form elements")]
+        forms: bool,
+        #[arg(long, short = 'n', help = "Show only navigation elements")]
+        navigation: bool,
+        #[arg(long, default_value = "100", help = "Limit results")]
+        limit: usize,
+        #[arg(long, help = "Include bounding boxes")]
+        with_bounds: bool,
+        #[arg(long, help = "Include CSS selectors")]
+        with_selectors: bool,
+    },
+
+    #[command(about = "Label interactive elements for Vision AI")]
+    Label {
+        #[arg(help = "CSS selector (optional)")]
+        selector: Option<String>,
+        #[arg(long, short = 'o', help = "Output screenshot path")]
+        output: Option<String>,
     },
 
     #[command(about = "Get event listeners for element")]

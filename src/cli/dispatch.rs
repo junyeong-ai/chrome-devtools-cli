@@ -779,46 +779,66 @@ async fn handle_via_daemon(
             }
         }
 
-        Command::Click { selector, .. } => {
+        Command::Click {
+            selector, r#ref, ..
+        } => {
             let result = daemon_request(
                 &mut client,
                 "click",
                 session_id,
-                json!({"selector": selector}),
+                json!({"selector": selector, "ref": r#ref}),
             )
             .await?;
-            print_json_or(&result, cli.json, &format!("Clicked: {}", selector))?;
+            let target = selector
+                .as_deref()
+                .or(r#ref.as_deref())
+                .unwrap_or("element");
+            print_json_or(&result, cli.json, &format!("Clicked: {}", target))?;
         }
 
-        Command::Hover { selector } => {
+        Command::Hover { selector, r#ref } => {
             let result = daemon_request(
                 &mut client,
                 "hover",
                 session_id,
-                json!({"selector": selector}),
+                json!({"selector": selector, "ref": r#ref}),
             )
             .await?;
-            print_json_or(&result, cli.json, &format!("Hovered: {}", selector))?;
+            let target = selector
+                .as_deref()
+                .or(r#ref.as_deref())
+                .unwrap_or("element");
+            print_json_or(&result, cli.json, &format!("Hovered: {}", target))?;
         }
 
-        Command::Fill { selector, text, .. } => {
+        Command::Fill {
+            selector,
+            text,
+            r#ref,
+            ..
+        } => {
             let result = daemon_request(
                 &mut client,
                 "fill",
                 session_id,
-                json!({"selector": selector, "text": text}),
+                json!({"selector": selector, "ref": r#ref, "text": text}),
             )
             .await?;
+            let target = selector
+                .as_deref()
+                .or(r#ref.as_deref())
+                .unwrap_or("element");
             print_json_or(
                 &result,
                 cli.json,
-                &format!("Filled '{}' into: {}", text, selector),
+                &format!("Filled '{}' into: {}", text, target),
             )?;
         }
 
         Command::Type {
             selector,
             text,
+            r#ref,
             delay,
             ..
         } => {
@@ -826,13 +846,17 @@ async fn handle_via_daemon(
                 &mut client,
                 "type",
                 session_id,
-                json!({"selector": selector, "text": text, "delay": delay.unwrap_or(50)}),
+                json!({"selector": selector, "ref": r#ref, "text": text, "delay": delay.unwrap_or(50)}),
             )
             .await?;
+            let target = selector
+                .as_deref()
+                .or(r#ref.as_deref())
+                .unwrap_or("element");
             print_json_or(
                 &result,
                 cli.json,
-                &format!("Typed '{}' into: {}", text, selector),
+                &format!("Typed '{}' into: {}", text, target),
             )?;
         }
 
@@ -1196,6 +1220,7 @@ async fn handle_via_daemon(
             selector,
             depth,
             interactable,
+            verbose,
         } => {
             let result = client
                 .request(
@@ -1204,7 +1229,49 @@ async fn handle_via_daemon(
                         "session_id": session_id,
                         "selector": selector,
                         "depth": depth,
-                        "interactable": interactable
+                        "interactable": interactable,
+                        "verbose": verbose
+                    }),
+                )
+                .await?;
+            print_json(&result)?;
+        }
+
+        Command::Describe {
+            selector,
+            interactable,
+            forms,
+            navigation,
+            limit,
+            with_bounds,
+            with_selectors,
+        } => {
+            let result = client
+                .request(
+                    "describe",
+                    json!({
+                        "session_id": session_id,
+                        "selector": selector,
+                        "interactable": interactable,
+                        "forms": forms,
+                        "navigation": navigation,
+                        "limit": limit,
+                        "with_bounds": with_bounds,
+                        "with_selectors": with_selectors
+                    }),
+                )
+                .await?;
+            print_json(&result)?;
+        }
+
+        Command::Label { selector, output } => {
+            let result = client
+                .request(
+                    "label",
+                    json!({
+                        "session_id": session_id,
+                        "selector": selector,
+                        "output": output
                     }),
                 )
                 .await?;
@@ -1213,6 +1280,7 @@ async fn handle_via_daemon(
 
         Command::Scroll {
             selector,
+            r#ref,
             behavior,
             block,
         } => {
@@ -1222,16 +1290,22 @@ async fn handle_via_daemon(
                     json!({
                         "session_id": session_id,
                         "selector": selector,
+                        "ref": r#ref,
                         "behavior": behavior,
                         "block": block
                     }),
                 )
                 .await?;
-            print_json_or(&result, cli.json, &format!("Scrolled to: {}", selector))?;
+            let target = selector
+                .as_deref()
+                .or(r#ref.as_deref())
+                .unwrap_or("element");
+            print_json_or(&result, cli.json, &format!("Scrolled to: {}", target))?;
         }
 
         Command::Select {
             selector,
+            r#ref,
             value,
             index,
             label,
@@ -1242,6 +1316,7 @@ async fn handle_via_daemon(
                     json!({
                         "session_id": session_id,
                         "selector": selector,
+                        "ref": r#ref,
                         "value": value,
                         "index": index,
                         "label": label
